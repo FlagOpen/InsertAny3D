@@ -1,0 +1,57 @@
+# Python environments, caches, and build products
+**/.venv/
+**/__pycache__/
+*.py[cod]
+**/*.egg-info/
+**/.cache/
+/.cache/
+/.build/
+**/build/
+**/dist/
+
+# Credentials and local configuration
+.env
+.env.*
+*.key
+*.pem
+*.secret
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+codex_ops/*.log
+codex_ops/*.ok
+*.ipynb
+
+# Assembled third-party checkout. It is reconstructed by
+# tools/bootstrap_third_party.sh from code/third_party.
+/third_party/
+
+# Model weights and downloaded datasets, wherever they occur
+**/weights/
+**/check_points/
+**/checkpoints/
+**/model_weights/
+**/huggingface/
+**/*.pth
+**/*.pt
+**/*.ckpt
+**/*.safetensors
+**/*.bin
+
+# Large local inputs and generated outputs
+/Scenes/
+/runs/
+/debug_bundles/
+/reproduction_outputs/
+/rendered_from_unity/
+/data/*
+!/data/README.md
+
+# Archives are normally downloaded data. Keep the reproducibility archives
+# under code/third_party/overlays tracked explicitly.
+*.zip
+*.tar
+!code/third_party/overlays/*.tar

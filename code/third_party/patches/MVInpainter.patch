@@ -1,0 +1,575 @@
+diff --git a/README.md b/README.md
+index 836aed6..fbefdb9 100644
+--- a/README.md
++++ b/README.md
+@@ -95,7 +95,7 @@ CUDA_VISIBLE_DEVICES=0 python test_removal.py \
+   --output_path="demo_removal" \
+   --resume_from_checkpoint="best" \
+   --val_cfg=1.0 \
+-  --img_size=256 \ 
++  --img_size=256 \
+   --sampling_interval=1.0 \
+   --dataset_names realworld \
+   --reference_path="inpainted" \
+@@ -108,7 +108,7 @@ CUDA_VISIBLE_DEVICES=0 python test_removal.py \
+   --output_path="demo_removal" \
+   --resume_from_checkpoint="best" \
+   --val_cfg=1.0 \
+-  --img_size=512 \ 
++  --img_size=512 \
+   --sampling_interval=1.0 \
+   --dataset_names realworld \
+   --reference_path="inpainted" \
+@@ -133,9 +133,9 @@ Make sure the final folder looks like:
+ ```
+ - <folder>
+     - obj_bbox    # inpainted 2d images with new foreground and bbox json
++    - plane_masks # (optional, only for mask_adaption) masks of basic plane where the foreground is placed on
+     - removal     # images without foregrounds
+     - warp_masks  # masks from adaption for the removal folder
+-    - plane_masks # (optional, only for mask_adaption) masks of basic plane where the foreground is placed on
+ ```
+ 
+ 5. Run `MVInpainter-O` for novel view synthesis:
+diff --git a/dataloaders/editor_dataset.py b/dataloaders/editor_dataset.py
+index fec8e91..b5a91c5 100644
+--- a/dataloaders/editor_dataset.py
++++ b/dataloaders/editor_dataset.py
+@@ -45,11 +45,46 @@ def square_crop(image, mask):
+     return image, mask
+ 
+ 
++# class EditorDataset(Dataset):
++#     def __init__(self, dataset_root, edited_index, image_height, image_width, n_frames_per_sequence,
++#                  sampling_interval=1.0, rank=0, square_crop=True, mask_dilate=None,
++#                  reference_path="inpainted", reference_num=-1, reference_split=-1,
++#                  caption_type=None,
++#                  **kwargs):
++#         super(EditorDataset, self).__init__()
++#         self.dataset_root = dataset_root
++#         self.image_height = image_height
++#         self.image_width = image_width
++#         self.global_data_list = collections.defaultdict(list)
++#         self.n_frames_per_sequence = n_frames_per_sequence
++#         self.square_crop = square_crop
++#         self.sampling_interval = sampling_interval
++#         self.reference_split = reference_split
++#         self.transform = transforms.Compose([transforms.ToTensor(),
++#                                              transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
++
++#         self.total_num = 0
++#         self.global_data_list = collections.defaultdict(dict)
++#         self.scenes = glob(f"{dataset_root}/*")
++#         self.scenes = [s.split('/')[-1] for s in self.scenes]
++
++#         for scene in self.scenes:
++#             self.global_data_list[scene]["masks"] = sorted(glob(f"{dataset_root}/{scene}/warp_masks/*.png"))
++#             self.global_data_list[scene]["images"] = sorted(glob(f"{dataset_root}/{scene}/removal/*.png"))
++#             self.global_data_list[scene]["images"] = self.global_data_list[scene]["images"][:len(self.global_data_list[scene]["masks"])]
++#             self.global_data_list[scene]["inpainted"] = [f"{dataset_root}/{scene}/obj_bbox/{str(edited_index).zfill(4)}.png"]
++
++#         self.image_list, self.mask_list, self.inpainted_list, self.fname_list = self.realworld_reset_dataset(rank=rank)
++#         self.mask_dilate = mask_dilate
++#         self.enable_bbox_mask = kwargs.get("enable_bbox_mask", False)
++#         self.caption_type = caption_type
++
++
+ class EditorDataset(Dataset):
+     def __init__(self, dataset_root, edited_index, image_height, image_width, n_frames_per_sequence,
+                  sampling_interval=1.0, rank=0, square_crop=True, mask_dilate=None,
+                  reference_path="inpainted", reference_num=-1, reference_split=-1,
+-                 caption_type=None,
++                 caption_type=None, scene_name=None, 
+                  **kwargs):
+         super(EditorDataset, self).__init__()
+         self.dataset_root = dataset_root
+@@ -65,24 +100,28 @@ class EditorDataset(Dataset):
+ 
+         self.total_num = 0
+         self.global_data_list = collections.defaultdict(dict)
+-        self.scenes = glob(f"{dataset_root}/*")
+-        self.scenes = [s.split('/')[-1] for s in self.scenes]
+-
+-        for scene in self.scenes:
+-            self.global_data_list[scene]["masks"] = sorted(glob(f"{dataset_root}/{scene}/warp_masks/*.png"))
+-            self.global_data_list[scene]["images"] = sorted(glob(f"{dataset_root}/{scene}/removal/*.png"))
+-            self.global_data_list[scene]["images"] = self.global_data_list[scene]["images"][:len(self.global_data_list[scene]["masks"])]
+-            self.global_data_list[scene]["inpainted"] = [f"{dataset_root}/{scene}/obj_bbox/{str(edited_index).zfill(4)}.png"]
++        
++        # 使用提供的scene_name或从路径获取
++        if scene_name is None:
++            self.scene_name = os.path.basename(dataset_root)  # 获取路径的最后一部分作为场景名
++        else:
++            self.scene_name = scene_name
++        
++        # 直接加载当前场景的数据
++        self.global_data_list[self.scene_name]["masks"] = sorted(glob(f"{dataset_root}/warp_masks/*.png"))
++        self.global_data_list[self.scene_name]["images"] = sorted(glob(f"{dataset_root}/removal/*.png"))
++        self.global_data_list[self.scene_name]["images"] = self.global_data_list[self.scene_name]["images"][:len(self.global_data_list[self.scene_name]["masks"])]
++        self.global_data_list[self.scene_name]["inpainted"] = [f"{dataset_root}/obj_bbox/{str(edited_index).zfill(4)}.png"]
+ 
+         self.image_list, self.mask_list, self.inpainted_list, self.fname_list = self.realworld_reset_dataset(rank=rank)
+         self.mask_dilate = mask_dilate
+         self.enable_bbox_mask = kwargs.get("enable_bbox_mask", False)
+         self.caption_type = caption_type
+-
++        
+     def __len__(self):
+         return len(self.image_list)
+ 
+-    def realworld_reset_dataset(self, rank=0, **kwargs):
++    def realworld_reset_dataset_bak(self, rank=0, **kwargs):
+         image_list = []
+         mask_list = []
+         inpainted_list = []
+@@ -127,6 +166,96 @@ class EditorDataset(Dataset):
+ 
+         return image_list, mask_list, inpainted_list, fname_list
+ 
++    def realworld_reset_dataset(self, rank=0, **kwargs):
++        image_list = []
++        mask_list = []
++        inpainted_list = []
++        fname_list = []
++
++        class_names = list(self.global_data_list.keys())
++        
++        for class_name in tqdm(class_names, desc=f"loading realset...", disable=rank != 0):
++            image_indices = self.global_data_list[f"{class_name}"]["images"].copy()
++            mask_indices = self.global_data_list[f"{class_name}"]["masks"].copy()
++
++            if len(mask_indices) == len(image_indices) + 1:
++                mask_indices = mask_indices[1:]
++                
++            # 确保图像和掩码数量一致
++            assert len(mask_indices) == len(image_indices)
++            
++            # 如果图像数量太少，可以通过重复来达到所需数量
++            if len(image_indices) < self.n_frames_per_sequence:
++                repeat_times = math.ceil(self.n_frames_per_sequence / len(image_indices))
++                image_indices = image_indices * repeat_times
++                mask_indices = mask_indices * repeat_times
++                image_indices = image_indices[:self.n_frames_per_sequence]
++                mask_indices = mask_indices[:self.n_frames_per_sequence]
++            else:
++                # 对于数量足够的图像，可以采用分批处理的方式
++                # 计算批次数
++                batch_size = self.n_frames_per_sequence
++                num_batches = (len(image_indices) + batch_size - 1) // batch_size
++                
++                batched_images = []
++                batched_masks = []
++                
++                # 分批处理
++                for i in range(num_batches):
++                    start_idx = i * batch_size
++                    end_idx = min((i + 1) * batch_size, len(image_indices))
++                    
++                    if kwargs.get("sort_frames", True):
++                        batch_images = sorted(image_indices[start_idx:end_idx], key=lambda x: x.split("/")[-1])
++                        batch_masks = sorted(mask_indices[start_idx:end_idx], key=lambda x: x.split("/")[-1])
++                    else:
++                        batch_images = image_indices[start_idx:end_idx]
++                        batch_masks = mask_indices[start_idx:end_idx]
++                    
++                    # 如果最后一批数据不足batch_size，可以通过重复来补齐
++                    if len(batch_images) < batch_size and kwargs.get("pad_last_batch", True):
++                        repeat_times = math.ceil(batch_size / len(batch_images))
++                        batch_images = (batch_images * repeat_times)[:batch_size]
++                        batch_masks = (batch_masks * repeat_times)[:batch_size]
++                    
++                    batched_images.append(batch_images)
++                    batched_masks.append(batch_masks)
++                
++                # 处理每个批次
++                for batch_idx in range(len(batched_images)):
++                    batch_images = batched_images[batch_idx]
++                    batch_masks = batched_masks[batch_idx]
++                    
++                    for inpainted in self.global_data_list[f"{class_name}"]["inpainted"]:
++                        image_list.extend(batch_images)
++                        mask_list.extend(batch_masks)
++                        inpainted_list.extend([inpainted] * len(batch_images))
++                    
++                    if len(self.global_data_list[f"{class_name}"]["inpainted"]) == 0:
++                        image_list.extend(batch_images)
++                        mask_list.extend(batch_masks)
++                        inpainted_list.extend([None] * len(batch_images))
++                
++                # 跳过下面的处理，继续下一个类别
++                continue
++            
++            # 这部分代码只会处理图像数量较少需要重复的情况
++            if kwargs.get("sort_frames", True):
++                image_indices.sort(key=lambda x: x.split("/")[-1])
++                mask_indices.sort(key=lambda x: x.split("/")[-1])
++            
++            for inpainted in self.global_data_list[f"{class_name}"]["inpainted"]:
++                image_list.extend(image_indices)
++                mask_list.extend(mask_indices)
++                inpainted_list.extend([inpainted] * len(image_indices))
++            
++            if len(self.global_data_list[f"{class_name}"]["inpainted"]) == 0:
++                image_list.extend(image_indices)
++                mask_list.extend(mask_indices)
++                inpainted_list.extend([None] * len(image_indices))
++
++        return image_list, mask_list, inpainted_list, fname_list
++
+     def __getitem__(self, index):
+         image = cv2.imread(self.image_list[index])
+         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+diff --git a/dataloaders/realworld_dataset.py b/dataloaders/realworld_dataset.py
+index 28de50b..e47072d 100644
+--- a/dataloaders/realworld_dataset.py
++++ b/dataloaders/realworld_dataset.py
+@@ -49,7 +49,7 @@ class RealWorldDataset(Dataset):
+     def __init__(self, dataset_root, image_height, image_width, n_frames_per_sequence,
+                  sampling_interval=1.0, rank=0, square_crop=True, mask_dilate=None,
+                  reference_path="inpainted", reference_num=-1, reference_split=-1,
+-                 caption_type=None,
++                 caption_type=None
+                  **kwargs):
+         super(RealWorldDataset, self).__init__()
+         self.dataset_root = dataset_root
+@@ -68,6 +68,7 @@ class RealWorldDataset(Dataset):
+         scenes = glob(f"{dataset_root}/*")
+         self.scenes = [s.split("/")[-1] for s in scenes]
+         for scene in self.scenes:
++            # MARK: 读取realworld
+             self.global_data_list[scene]["images"] = sorted(glob(f"{dataset_root}/{scene}/images/*"))
+             self.global_data_list[scene]["masks"] = sorted(glob(f"{dataset_root}/{scene}/masks/*"))
+             inpainted_list = glob(f"{dataset_root}/{scene}/{reference_path}/*")  # 读取编辑后的frame0
+diff --git a/draw_bbox.py b/draw_bbox.py
+index f732271..28de80f 100644
+--- a/draw_bbox.py
++++ b/draw_bbox.py
+@@ -97,7 +97,7 @@ if __name__ == "__main__":
+                 img_pointed = gr.Plot(label='Pointed image', max_size=512)
+         with gr.Row():
+             clear_point_button = gr.Button(value="Clear points", label="Clear points")
+-            offset = gr.Slider(value=50, label='h offset', minimum=0, maximum=200, interactive=True)
++            offset = gr.Slider(value=50, label='h offset', minimum=0, maximum=1000, interactive=True)
+             save_point_button = gr.Button(value="Save points", label="Save points")
+ 
+         init_img.select(fn=get_select_coords, inputs=[init_img, mask, bottom_points, offset], outputs=[img_pointed, bottom_points, top_points])
+diff --git a/mask_adaption.py b/mask_adaption.py
+index 4ba1b16..7582d67 100644
+--- a/mask_adaption.py
++++ b/mask_adaption.py
+@@ -40,6 +40,26 @@ def draw_dashed_polyline(img, pts, color, thickness, dash_length):
+             # Draw the dashed segment.
+             cv2.line(img, tuple(np.int32(start)), tuple(np.int32(end)), color, thickness)
+ 
++def my_sort(fs: str, first_num = None, first_id = None):
++    if len(fs) == 0: return fs
++    def transfer(fstr:str):
++        fstr = fstr.split("/")[-1].split(".")[0]
++        return fstr[:2],fstr[2:]
++    fs = [(fss,)+transfer(fss) for fss in fs]
++    fs.sort(key=lambda x: (x[2],x[1]))
++    fs = [f[0] for f in fs]
++    if first_id is not None:
++        for _,f in enumerate(fs): 
++            if first_id in f:
++                first_num = _
++                break
++    if first_num is not None: 
++        fs = [fs[first_num:],fs[:first_num+1][::-1]]
++        print(f"Start from: {fs[0]}")
++    return fs
++
++use_my_sort = True
++first_id=None
+ 
+ if __name__ == '__main__':
+     parser = argparse.ArgumentParser(description="Mask adaption")
+@@ -55,98 +75,116 @@ if __name__ == '__main__':
+     args = parser.parse_args()
+ 
+     # load data
+-    clean_fs = glob(f"{args.input_path}/removal/*")
+-    edited_fs = glob(f"{args.input_path}/obj_bbox/*.png")
+-    bbox_fs = glob(f"{args.input_path}/obj_bbox/*.json")
+-    plane_mask_fs = glob(f"{args.input_path}/plane_masks/*")
+-    nframe = len(clean_fs)
+-
+-    roma_model = roma_outdoor(device="cuda")
+-
+-    # warpaffine with unmasked matching
+-    masked_flows = []
+-    Ms = []
+-
+-    for i in tqdm(range(nframe - 1)):
+-        if i > len(plane_mask_fs) - 1:
+-            mask = np.ones((args.h, args.w), dtype=np.float32)
+-        else:
+-            mask = cv2.imread(plane_mask_fs[i])[:, :, 0] / 255
+-            mask = cv2.resize(mask, [args.h, args.w], interpolation=cv2.INTER_NEAREST)
+-            mask[mask > 0] = 1
+-
+-        # src, dst points from dense matching
+-        imA_path = clean_fs[i]
+-        imB_path = clean_fs[i + 1]
+-        with torch.no_grad():
+-            warp, certainty = roma_model.match(imA_path, imB_path, device="cuda")
+-            mask = cv2.resize(mask, [certainty.shape[1], certainty.shape[0]], interpolation=cv2.INTER_NEAREST)
+-            certainty2 = certainty.clone()
+-            certainty2[mask == 1] = 0
+-            matches, certainty = roma_model.sample(warp, certainty2)
+-            src_pts, dst_pts = roma_model.to_pixel_coordinates(matches, args.h, args.w, args.h, args.w)
+-
+-        src_pts, dst_pts = src_pts.cpu().numpy(), dst_pts.cpu().numpy()
+-        M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+-        Ms.append(M)
+-
+-    # load bottom points
+-    print("Processing", bbox_fs[args.edited_index])
+-    info = json.load(open(bbox_fs[args.edited_index]))
+-
+-    all_pts = [np.array(info['bottom']).reshape(-1, 1, 2)]
+-    pts_h = np.array(info['bottom'])[:, 1].mean() - np.array(info['top'])[:, 1].mean()
+-
+-    for M in Ms:
+-        dst = cv2.perspectiveTransform(all_pts[-1].astype(np.float32), M)
+-        all_pts.append(dst)
+-
+-    print("Drawing bbox")
+-    convex_masks = []
+-    res = []
+-    for i, pts in enumerate(all_pts):
+-        if i == 0:
+-            img = plt.imread(bbox_fs[args.edited_index].replace(".json", ".png"))
+-        else:
+-            img = plt.imread(clean_fs[i])
+-        img = img[:, :, :3]
+-        img = cv2.resize(img, [args.h, args.w])
+-        pts = pts.reshape(-1, 1, 2).astype(np.int32)
+-        pts_top = pts.copy()
+-        pts_top[:, :, 1] -= pts_h.astype(np.int32)
+-        hull = cv2.convexHull(np.concatenate([pts_top, pts], axis=0).reshape(1, -1, 2)).astype(np.int32)
+-        for pt in hull[:, 0]:
+-            cv2.circle(img, (pt[0], pt[1]), radius=10, color=(1, 1, 0), thickness=-1)
+-
+-        if i == 0:
+-            cv2.polylines(img, [pts], isClosed=True, color=(0, 0, 1), thickness=3)
+-            cv2.polylines(img, [pts_top], isClosed=True, color=(1, 0, 0), thickness=3)
+-        else:
+-            draw_dashed_polyline(img, pts.reshape(-1, 2), color=(0, 0, 1), thickness=3, dash_length=25)
+-            draw_dashed_polyline(img, pts_top.reshape(-1, 2), color=(1, 0, 0), thickness=3, dash_length=25)
+-
+-        new_mask = np.zeros((args.h, args.w, 3), dtype=np.uint8)
+-        # fill the polygon
+-        cv2.fillConvexPoly(new_mask, hull, color=(1, 1, 1))
+-        new_mask = new_mask[:, :, 0]
+-        img[new_mask == 1, :] = np.clip(img[new_mask == 1, :] - 0.15, 0, 1.0)
+-        convex_masks.append(new_mask)
+-
+-        res.append(img)
+-
+-    resc = np.concatenate(res, axis=1)
+-    plt.imsave(f"{args.input_path}/{str(args.edited_index).zfill(4)}_bbox.png", resc)
+-
+-    # building masks
+-    print("Getting masks")
+-    kernel = np.ones((args.mask_dilate, args.mask_dilate))
+-    enlarged_convex_masks = []
+-    for i, mask in enumerate(convex_masks):
+-        mask2 = cv2.dilate(mask, kernel, iterations=1)
+-        if not args.no_irregular_mask:
+-            mask2 = random_irregular_object_mask(mask2, mask_enlarge=[0.01, 0.01], pts_size=[60, 70], width_range=[40, 60])
+-        enlarged_convex_masks.append(mask2)
+-
+-    os.makedirs(f"{args.input_path}/warp_masks", exist_ok=True)
+-    for i, mask in enumerate(enlarged_convex_masks):
+-        cv2.imwrite(f"{args.input_path}/warp_masks/{str(i).zfill(4)}.png", (mask * 255).astype(np.uint8))
++    clean_fs = glob(f"{args.input_path}/removal/*")          # mvinpainter_f_256
++    edited_fs = glob(f"{args.input_path}/obj_bbox/*.png")    # 
++    bbox_fs = glob(f"{args.input_path}/obj_bbox/*.json")     # draw_bbox.py
++    plane_mask_fs = glob(f"{args.input_path}/plane_masks/*") # Grounded-SAM
++    if use_my_sort:
++        clean_fs = my_sort(clean_fs,first_id=first_id)
++        plane_mask_fs = my_sort(plane_mask_fs)
++    else:
++        clean_fs.sort()
++        plane_mask_fs.sort()
++
++    def my_roma(clean_fs):
++
++        nframe = len(clean_fs)
++        roma_model = roma_outdoor(device="cuda")
++        # warpaffine with unmasked matching
++        masked_flows = []
++        Ms = []
++
++        # 遍历所有图片，获取所有图片的平面区域之间的稀疏的点映射关系
++        # 平面的点映射关系最终体现为图和图之间的一个Homo矩阵
++        for i in tqdm(range(nframe - 1)):
++            if len(plane_mask_fs) == 0:
++                mask = np.zeros((args.h, args.w), dtype=np.float32)      # 创建一个全0（全留）的mask
++            elif i > len(plane_mask_fs) - 1:                             # 缺少平面mask
++                mask = np.ones((args.h, args.w), dtype=np.float32)       # 创建一个全1（全删）的mask
++            else:
++                mask = cv2.imread(plane_mask_fs[i])[:, :, 0] / 255
++                mask = cv2.resize(mask, [args.h, args.w], interpolation=cv2.INTER_NEAREST)
++                mask[mask > 0] = 1
++
++            # src, dst points from dense matching
++            imA_path = clean_fs[i]
++            imB_path = clean_fs[i + 1]
++            # print(f"Matching: {imA_path} - {imB_path}")
++            with torch.no_grad():
++                warp, certainty = roma_model.match(imA_path, imB_path, device="cuda")                                 # roma match， 计算两张图像之间的密集对应关系
++                mask = cv2.resize(mask, [certainty.shape[1], certainty.shape[0]], interpolation=cv2.INTER_NEAREST)    # 近邻差值，保留mask的二值性
++                certainty2 = certainty.clone()                                                                        
++                certainty2[mask == 1] = 0                                                                             # 只使用非平面区域（mask==0）的特征点进行几何变换估计（？）
++                matches, certainty = roma_model.sample(warp, certainty2)                                              # roma sample, 从密集匹配结果中采样出离散的特征点对
++                src_pts, dst_pts = roma_model.to_pixel_coordinates(matches, args.h, args.w, args.h, args.w)           # 将归一化坐标系中的点转换为像素坐标系中的点
++
++            src_pts, dst_pts = src_pts.cpu().numpy(), dst_pts.cpu().numpy()
++            M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
++            Ms.append(M)
++
++        # load bottom points # 加载打框的底部四个点
++        print("Processing", bbox_fs[args.edited_index])
++        info = json.load(open(bbox_fs[args.edited_index]))
++
++        all_pts = [np.array(info['bottom']).reshape(-1, 1, 2)]
++        pts_h = np.array(info['bottom'])[:, 1].mean() - np.array(info['top'])[:, 1].mean()
++
++        # 让底部四个点在图片之间递推，获取每张图的pts坐标
++        for M in Ms:
++            dst = cv2.perspectiveTransform(all_pts[-1].astype(np.float32), M)
++            all_pts.append(dst)
++
++        # 绘制bbox
++        print("Drawing bbox")
++        convex_masks = []
++        res = []
++        for i, pts in enumerate(all_pts):
++            if i == 0:
++                img = plt.imread(bbox_fs[args.edited_index].replace(".json", ".png"))
++            else:
++                img = plt.imread(clean_fs[i])
++            img = img[:, :, :3]
++            img = cv2.resize(img, [args.h, args.w])
++            pts = pts.reshape(-1, 1, 2).astype(np.int32)
++            pts_top = pts.copy()
++            pts_top[:, :, 1] -= pts_h.astype(np.int32)
++            hull = cv2.convexHull(np.concatenate([pts_top, pts], axis=0).reshape(1, -1, 2)).astype(np.int32)
++            for pt in hull[:, 0]:
++                cv2.circle(img, (pt[0], pt[1]), radius=10, color=(1, 1, 0), thickness=-1)
++
++            if i == 0:
++                cv2.polylines(img, [pts], isClosed=True, color=(0, 0, 1), thickness=3)
++                cv2.polylines(img, [pts_top], isClosed=True, color=(1, 0, 0), thickness=3)
++            else:
++                draw_dashed_polyline(img, pts.reshape(-1, 2), color=(0, 0, 1), thickness=3, dash_length=25)
++                draw_dashed_polyline(img, pts_top.reshape(-1, 2), color=(1, 0, 0), thickness=3, dash_length=25)
++
++            new_mask = np.zeros((args.h, args.w, 3), dtype=np.uint8)
++            # fill the polygon
++            cv2.fillConvexPoly(new_mask, hull, color=(1, 1, 1))
++            new_mask = new_mask[:, :, 0]
++            img[new_mask == 1, :] = np.clip(img[new_mask == 1, :] - 0.15, 0, 1.0)
++            convex_masks.append(new_mask)
++
++            res.append(img)
++
++        resc = np.concatenate(res, axis=1)
++        plt.imsave(f"{args.input_path}/{str(args.edited_index).zfill(4)}_bbox.png", resc)
++
++        # building masks
++        print("Getting masks")
++        kernel = np.ones((args.mask_dilate, args.mask_dilate))
++        enlarged_convex_masks = []
++        for i, mask in enumerate(convex_masks):
++            mask2 = cv2.dilate(mask, kernel, iterations=1)
++            if not args.no_irregular_mask:
++                mask2 = random_irregular_object_mask(mask2, mask_enlarge=[0.01, 0.01], pts_size=[60, 70], width_range=[40, 60])
++            enlarged_convex_masks.append(mask2)
++
++        os.makedirs(f"{args.input_path}/warp_masks", exist_ok=True)
++        for i, mask in enumerate(enlarged_convex_masks):
++            cv2.imwrite(f"{args.input_path}/warp_masks/{str(i).zfill(4)}.png", (mask * 255).astype(np.uint8))
++
++    # if type(clean_fs)==list: [my_roma(clean_fss) for clean_fss in clean_fs]
++    # else: my_roma(clean_fs)
++    my_roma(clean_fs)
+\ No newline at end of file
+diff --git a/roma/models/model_zoo/roma_models.py b/roma/models/model_zoo/roma_models.py
+index 38fb4c7..80e803c 100644
+--- a/roma/models/model_zoo/roma_models.py
++++ b/roma/models/model_zoo/roma_models.py
+@@ -1,5 +1,6 @@
+ from roma.models.matcher import *
+ from roma.models.matcher import *
++from roma.models.encoders import CNNandDinov2
+ from roma.models.transformer import Block, TransformerDecoder, MemEffAttention
+ 
+ 
+diff --git a/test_nvs.py b/test_nvs.py
+index 63e71c0..0784b7f 100644
+--- a/test_nvs.py
++++ b/test_nvs.py
+@@ -143,7 +143,9 @@ def log_validation(accelerator, config, args, vae, text_encoder, tokenizer, unet
+ 
+                 if args.save_text:
+                     os.makedirs(f"outputs/{args.output_path}/caption", exist_ok=True)
+-                    with open(f"outputs/{args.output_path}/caption/{batch.sequence_category[0].split('*')[0]}.txt", 'w') as w:
++                    # 使用batch中的scene_name或自定义scene_name
++                    scene_name = args.scene_name if args.scene_name else batch.sequence_category[0].split('*')[0]
++                    with open(f"outputs/{args.output_path}/caption/{scene_name}.txt", 'w') as w:
+                         w.write(final_text[0])
+ 
+                 if args.limit_frame is not None:
+@@ -151,7 +153,7 @@ def log_validation(accelerator, config, args, vae, text_encoder, tokenizer, unet
+                     batch.image_rgb = batch.image_rgb[:args.limit_frame]
+                     batch.mask = batch.mask[:args.limit_frame]
+                     config.n_frames_per_sequence = args.limit_frame
+-
++                print(f"### 1 {len(init_image)}")
+                 print(batch.sequence_name[0], final_text)
+                 mask = batch.mask.to(device)  # [B,1,H,W]
+                 mask[::config.n_frames_per_sequence] = 0  # the first view of every group should not be masked
+@@ -199,10 +201,12 @@ def log_validation(accelerator, config, args, vae, text_encoder, tokenizer, unet
+ 
+                 if args.save_images:
+                     save_results = preds[0:]
+-                    os.makedirs(f"outputs/{args.output_path}/{batch.sequence_category[0].split('*')[0]}", exist_ok=True)
++                    # 使用batch中的scene_name或自定义scene_name
++                    scene_name = args.scene_name if args.scene_name else batch.sequence_category[0].split('*')[0]
++                    os.makedirs(f"outputs/{args.output_path}/{scene_name}", exist_ok=True)
+                     for i in range(save_results.shape[0]):
+                         save_result = (save_results[i, :, :, ::-1] * 255).astype(np.uint8)
+-                        cv2.imwrite(f"outputs/{args.output_path}/{batch.sequence_category[i].split('*')[0]}/{batch.filename[i].replace('.jpg', '.png')}", save_result)
++                        cv2.imwrite(f"outputs/{args.output_path}/{scene_name}/{batch.filename[i].replace('.jpg', '.png')}", save_result)
+                 else:
+                     if flows is not None:  # [1,3,f-1,h,w]
+                         flows = einops.rearrange(flows[0, :2], "c f h w -> f h w c").cpu().numpy()
+@@ -217,7 +221,8 @@ def log_validation(accelerator, config, args, vae, text_encoder, tokenizer, unet
+                     else:
+                         show_image = np.concatenate([init_image, masked_image, preds], axis=1)
+                     show_image = np.clip(np.concatenate([img for img in show_image], axis=1) * 255, 0, 255).astype(np.uint8)
+-                    cv2.imwrite(f"outputs/{args.output_path}/{batch.sequence_category[0]}_{batch.sequence_name[0]}_{l}.png", show_image[:, :, ::-1])
++                    scene_name = args.scene_name if args.scene_name else batch.sequence_category[0]
++                    cv2.imwrite(f"outputs/{args.output_path}/{scene_name}_{batch.sequence_name[0]}_{l}.png", show_image[:, :, ::-1])
+ 
+ 
+ def parse_args():
+@@ -269,6 +274,7 @@ def parse_args():
+     parser.add_argument("--flow_mask_dilate", default=None, type=float)
+     parser.add_argument("--limit_frame", default=None, type=int)
+     parser.add_argument("--repeat", default=1, type=int)
++    parser.add_argument("--scene_name", type=str, default=None, help="Custom scene name for output paths (default: use directory name)")
+ 
+     args = parser.parse_args()
+     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
+@@ -314,6 +320,7 @@ if __name__ == '__main__':
+                                 reference_num=args.reference_num,
+                                 reference_split=args.reference_split,
+                                 enable_bbox_mask=args.enable_bbox_mask,
++                                scene_name=args.scene_name,  # 添加这一行
+                                 caption_type=args.caption_type)
+ 
+     accelerator.print(f"Total image num:{len(val_dataset)},"

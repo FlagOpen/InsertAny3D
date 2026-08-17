@@ -1,0 +1,419 @@
+diff --git a/test.py b/test.py
+index 24a9e87..42fd8ec 100644
+--- a/test.py
++++ b/test.py
+@@ -1,6 +1,7 @@
+ import os
+ import sys
+ import argparse
++import shlex
+ 
+ # os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
+ os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
+@@ -12,74 +13,107 @@ from trellis.pipelines import TrellisImageTo3DPipeline
+ from trellis.utils import render_utils, postprocessing_utils
+ from trellis.utils import insertany3d_render_utils
+ 
+-
+-
+-parser = argparse.ArgumentParser(description='TRELLIS Image to 3D Pipeline')
+-parser.add_argument('input_image', help='输入图像路径')
+-parser.add_argument('--save_base'  , help='输出目录路径'              , default="./output")
+-parser.add_argument('--save_name'  , help='保存文件名（不包含扩展名）', default=None      )
+-parser.add_argument('--skip_glb' , action='store_true', help='跳过GLB文件生成')
+-parser.add_argument('--skip_nerf', action='store_true', help='跳过GLB文件生成')
+-args = parser.parse_args()
+-
+ # Load a pipeline from a model folder or a Hugging Face model hub.
+ pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-large")
+ pipeline.cuda()
+ 
+-# Load an image
+-image = Image.open(args.input_image)
+-
+-# Run the pipeline
+-formats = ['gaussian']
+-if not args.skip_glb : format += ["mesh"]
+-if not args.skip_nerf: format += ["radiance_field"]
+-
+-outputs = pipeline.run(
+-    image,
+-    seed=1,
+-    formats=formats
+-    # Optional parameters
+-    # sparse_structure_sampler_params={
+-    #     "steps": 12,
+-    #     "cfg_strength": 7.5,
+-    # },
+-    # slat_sampler_params={
+-    #     "steps": 12,
+-    #     "cfg_strength": 3,
+-    # },
+-)
+-# outputs is a dictionary containing generated 3D assets in different formats:
+-# - outputs['gaussian']: a list of 3D Gaussians
+-# - outputs['radiance_field']: a list of radiance fields
+-# - outputs['mesh']: a list of meshes
+-
+-# Render the outputs
+-
+-insertany3d_render_utils.save_gaussian_result(outputs['gaussian'][0], args.save_base, args.save_name)
+-
+-print("Rendering Gaussian:")
+-video = render_utils.render_video(outputs['gaussian'][0])['color']
+-imageio.mimsave("sample_gs.mp4", video, fps=30)
+-
+-if not args.skip_nerf:
+-    print("Rendering Radiance Field:")
+-    video = render_utils.render_video(outputs['radiance_field'][0])['color']
+-    imageio.mimsave("sample_rf.mp4", video, fps=30)
+-
+-if not args.skip_glb:
+-    print("Rendering Mesh:")
+-    video = render_utils.render_video(outputs['mesh'][0])['normal']
+-    imageio.mimsave("sample_mesh.mp4", video, fps=30)
+-    glb_path = f"{args.save_base}/sample.glb"
+-    print(f"Extracting Mesh to GLB <glb_path>:")
+-    # GLB files can be extracted from the outputs
+-    glb = postprocessing_utils.to_glb(
+-        outputs['gaussian'][0],
+-        outputs['mesh'][0],
++def process_single_image(args):
++    # Load an image
++    image = Image.open(args.input_image)
++    
++    # Run the pipeline
++    formats = ['gaussian']
++    if not args.skip_glb: formats.append("mesh")
++    if not args.skip_nerf: formats.append("radiance_field")
++    
++    outputs, segged_image = pipeline.run_with_image_return(
++        image,
++        seed=1,
++        formats=formats
+         # Optional parameters
+-        simplify=0.95,          # Ratio of triangles to remove in the simplification process
+-        texture_size=1024,      # Size of the texture used for the GLB
++        # sparse_structure_sampler_params={
++        #     "steps": 12,
++        #     "cfg_strength": 7.5,
++        # },
++        # slat_sampler_params={
++        #     "steps": 12,
++        #     "cfg_strength": 3,
++        # },
+     )
+-    glb.export(glb_path)
++    # outputs is a dictionary containing generated 3D assets in different formats:
++    # - outputs['gaussian']: a list of 3D Gaussians
++    # - outputs['radiance_field']: a list of radiance fields
++    # - outputs['mesh']: a list of meshes
++    
++    # Render the outputs
++    
++    insertany3d_render_utils.save_gaussian_result(outputs['gaussian'][0], args.save_base, args.save_name, processed_image=image)
++    
++    print("Rendering Gaussian:")
++    if not args.skip_video:
++        video = render_utils.render_video(outputs['gaussian'][0])['color']
++        video_path = os.path.join(args.save_base, f"{args.save_name or 'sample'}_gs.mp4")
++        imageio.mimsave(video_path, video, fps=30)
++    
++    if not args.skip_nerf and not args.skip_video:
++        print("Rendering Radiance Field:")
++        video = render_utils.render_video(outputs['radiance_field'][0])['color']
++        video_path = os.path.join(args.save_base, f"{args.save_name or 'sample'}_rf.mp4")
++        imageio.mimsave(video_path, video, fps=30)
+     
+-print("Finished.")
+\ No newline at end of file
++    if not args.skip_glb:
++        if not args.skip_video:
++            print("Rendering Mesh:")
++            video = render_utils.render_video(outputs['mesh'][0])['normal']
++            video_path = os.path.join(args.save_base, f"{args.save_name or 'sample'}_mesh.mp4")
++            imageio.mimsave(video_path, video, fps=30)
++        
++        glb_path = f"{args.save_base}/{args.save_name or 'sample'}.glb"
++        print(f"Extracting Mesh to GLB {glb_path}:")
++        # GLB files can be extracted from the outputs
++        glb = postprocessing_utils.to_glb(
++            outputs['gaussian'][0],
++            outputs['mesh'][0],
++            # Optional parameters
++            simplify=0.95,          # Ratio of triangles to remove in the simplification process
++            texture_size=1024,      # Size of the texture used for the GLB
++        )
++        glb.export(glb_path)
++    
++    print(f"Finished processing {args.input_image}")
++    
++def main():
++    parser = argparse.ArgumentParser(description='TRELLIS Image to 3D Pipeline')
++    parser.add_argument('--input_image', help='输入图像路径')
++    parser.add_argument('--save_base', help='输出目录路径', default="./output")
++    parser.add_argument('--save_name', help='保存文件名（不包含扩展名）', default=None)
++    parser.add_argument('--skip_glb', action='store_true', help='跳过GLB文件生成')
++    parser.add_argument('--skip_nerf', action='store_true', help='跳过RF文件生成')
++    parser.add_argument('--skip_video', action='store_true', help='跳过视频渲染')
++    parser.add_argument('--config', help='配置文件路径，每行一个参数设置')
++    
++    args = parser.parse_args()
++    
++    if args.config:
++        # 如果指定了配置文件，则读取配置文件中的参数列表
++        with open(args.config, 'r') as f:
++            config_lines = [line.strip() for line in f.readlines() if line.strip() and not line.strip().startswith('#')]
++        
++        print(f"从配置文件 {args.config} 中读取了 {len(config_lines)} 条任务")
++        
++        for i, cmd_str in enumerate(config_lines):
++            print(f"\n处理任务 [{i+1}/{len(config_lines)}]: {cmd_str}")
++            # 使用shlex.split正确处理引号内的空格
++            cmd_args_list = shlex.split(cmd_str)
++            # 解析每一条命令行参数
++            cmd_args = parser.parse_args(cmd_args_list)
++            # 执行处理
++            process_single_image(cmd_args)
++    else:
++        # 如果没有指定配置文件，则使用命令行参数
++        if not args.input_image:
++            parser.error("当不使用配置文件时，必须指定 --input_image 参数")
++        process_single_image(args)
++
++if __name__ == "__main__":
++    main()
+\ No newline at end of file
+diff --git a/test.sh b/test.sh
+index 7c0b406..c8cc71a 100755
+--- a/test.sh
++++ b/test.sh
+@@ -1,4 +1,4 @@
+ #!/bin/sh
+ cd $(dirname $0)
+ source .venv/bin/activate
+-python test.py $1 --skip_glb --skip_nerf
+\ No newline at end of file
++uv run test.py --input_image $1 --skip_glb --skip_nerf
+\ No newline at end of file
+diff --git a/trellis/pipelines/base.py b/trellis/pipelines/base.py
+index 9d214e4..e49b234 100644
+--- a/trellis/pipelines/base.py
++++ b/trellis/pipelines/base.py
+@@ -2,7 +2,7 @@ from typing import *
+ import torch
+ import torch.nn as nn
+ from .. import models
+-
++from tqdm import tqdm
+ 
+ class Pipeline:
+     """
+@@ -37,7 +37,9 @@ class Pipeline:
+             args = json.load(f)['args']
+ 
+         _models = {}
+-        for k, v in args['models'].items():
++        loading_iter = tqdm(args['models'].items())
++        for k, v in loading_iter:
++            loading_iter.set_postfix(modelname=f"{path}/{v}")
+             try:
+                 _models[k] = models.from_pretrained(f"{path}/{v}")
+             except:
+diff --git a/trellis/pipelines/trellis_image_to_3d.py b/trellis/pipelines/trellis_image_to_3d.py
+index 3725da2..df080b3 100644
+--- a/trellis/pipelines/trellis_image_to_3d.py
++++ b/trellis/pipelines/trellis_image_to_3d.py
+@@ -87,11 +87,12 @@ class TrellisImageTo3DPipeline(Pipeline):
+         has_alpha = False
+         if input.mode == 'RGBA':
+             alpha = np.array(input)[:, :, 3]
+-            if not np.all(alpha == 255):
+-                has_alpha = True
++            if not np.all(alpha == 255): has_alpha = True
+         if has_alpha:
++            print("[Preprocess] use original alpha channel")
+             output = input
+         else:
++            print("[Preprocess] use rembg")
+             input = input.convert('RGB')
+             max_size = max(input.size)
+             scale = min(1, 1024 / max_size)
+@@ -282,6 +283,24 @@ class TrellisImageTo3DPipeline(Pipeline):
+         slat = self.sample_slat(cond, coords, slat_sampler_params)
+         return self.decode_slat(slat, formats)
+ 
++    @torch.no_grad()
++    def run_with_image_return(
++        self,
++        image: Image.Image,
++        num_samples: int = 1,
++        seed: int = 42,
++        sparse_structure_sampler_params: dict = {},
++        slat_sampler_params: dict = {},
++        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
++        preprocess_image: bool = True,
++    ):
++        if preprocess_image: image = self.preprocess_image(image)
++        cond = self.get_cond([image])
++        torch.manual_seed(seed)
++        coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
++        slat = self.sample_slat(cond, coords, slat_sampler_params)
++        return self.decode_slat(slat, formats), image
++
+     @contextmanager
+     def inject_sampler_multi_image(
+         self,
+diff --git a/trellis/representations/gaussian/gaussian_model.py b/trellis/representations/gaussian/gaussian_model.py
+index 0c7d8f4..7329519 100755
+--- a/trellis/representations/gaussian/gaussian_model.py
++++ b/trellis/representations/gaussian/gaussian_model.py
+@@ -26,6 +26,8 @@ class Gaussian:
+         }
+         
+         self.sh_degree = sh_degree
++        # Compatibility alias used by the renderer implementation.
++        self.max_sh_degree = sh_degree
+         self.active_sh_degree = sh_degree
+         self.mininum_kernel_size = mininum_kernel_size 
+         self.scaling_bias = scaling_bias
+@@ -126,7 +128,12 @@ class Gaussian:
+         xyz = self.get_xyz.detach().cpu().numpy()
+         normals = np.zeros_like(xyz)
+         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+-        opacities = inverse_sigmoid(self.get_opacity).detach().cpu().numpy()
++        # Avoid writing +/-inf logits when a decoded Gaussian reaches exactly
++        # 0 or 1 opacity.  The custom rasterizers are not robust to those
++        # values, and a finite clamp is visually indistinguishable.
++        opacities_value = torch.nan_to_num(self.get_opacity, nan=1e-4, posinf=1.0 - 1e-4, neginf=1e-4)
++        opacities_value = opacities_value.clamp(1e-4, 1.0 - 1e-4)
++        opacities = inverse_sigmoid(opacities_value).detach().cpu().numpy()
+         scale = torch.log(self.get_scaling).detach().cpu().numpy()
+         rotation = (self._rotation + self.rots_bias[None, :]).detach().cpu().numpy()
+         
+@@ -213,4 +220,4 @@ class Gaussian:
+         self._opacity = self.inverse_opacity_activation(opacities) - self.opacity_bias
+         self._scaling = self.inverse_scaling_activation(torch.sqrt(torch.square(scales) - self.mininum_kernel_size ** 2)) - self.scale_bias
+         self._rotation = rots - self.rots_bias[None, :]
+-        
+\ No newline at end of file
++        
+diff --git a/trellis/utils/insertany3d_render_utils.py b/trellis/utils/insertany3d_render_utils.py
+index 7053b14..1a45acc 100644
+--- a/trellis/utils/insertany3d_render_utils.py
++++ b/trellis/utils/insertany3d_render_utils.py
+@@ -3,6 +3,7 @@ import cv2
+ import json
+ import imageio
+ import subprocess
++import torch
+ import numpy as np
+ from typing import Literal
+ from argparse import Namespace
+@@ -15,10 +16,18 @@ current_time = lambda : datetime.datetime.now().strftime("%y_%m_%d-%H_%M_%S") #2
+ 
+ def load_gaussian(ply_path):
+     trellis_gs = Gaussian([-0.5,-0.5,-0.5,0.5,0.5,0.5])
++    # Older TRELLIS renderer code refers to max_sh_degree while this compact
++    # representation exposes sh_degree only.
++    trellis_gs.max_sh_degree = trellis_gs.sh_degree
+     trellis_gs.load_ply(ply_path)
++    # Normalize legacy PLYs written with infinite opacity logits as well as
++    # newly decoded assets; this keeps the CUDA rasterizer deterministic.
++    with torch.no_grad():
++        opacity = torch.nan_to_num(trellis_gs.get_opacity, nan=1e-4, posinf=1.0 - 1e-4, neginf=1e-4)
++        trellis_gs.from_opacity(opacity.clamp(1e-4, 1.0 - 1e-4))
+     return trellis_gs
+ 
+-def _save_result(save_path, images, invdepths, absdepths, extrinsics, intrinsics, resolution):
++def _save_result(save_path, images, invdepths, absdepths, extrinsics, intrinsics, resolution, image_names=None):
+     """ For InsertAny3D Pipeline
+     save_path/
+     ├── images/                      # 渲染图像
+@@ -39,23 +48,35 @@ def _save_result(save_path, images, invdepths, absdepths, extrinsics, intrinsics
+             ├── 1.raw
+             └── ...
+     """
++    if image_names is None:
++        image_names = [f"{idx}.png" for idx in range(len(images))]
++    else:
++        image_names = [str(name) for name in image_names]
++        if len(image_names) != len(images):
++            raise ValueError(f"image_names 数量 ({len(image_names)}) 与图片数量 ({len(images)}) 不一致")
++        image_names = [name if name.lower().endswith(".png") else f"{name}.png" for name in image_names]
++        if any(os.path.basename(name) != name or name in {".", ".."} for name in image_names):
++            raise ValueError("image_names 只能包含文件名")
++
+     if images:
+         os.makedirs(f"{save_path}/images", exist_ok=True)
+         for idx, i in enumerate(images):
+-            cv2.imwrite(f"{save_path}/images/{idx}.png", cv2.cvtColor(i, cv2.COLOR_RGB2BGR))
+-        save_colmap_image_camera([f"{idx}.png" for idx in range(len(images))], extrinsics, intrinsics, resolution, f"{save_path}/sparse/0")
++            cv2.imwrite(f"{save_path}/images/{image_names[idx]}", cv2.cvtColor(i, cv2.COLOR_RGB2BGR))
++        save_colmap_image_camera(image_names, extrinsics, intrinsics, resolution, f"{save_path}/sparse/0")
+ 
+     if invdepths:
+         os.makedirs(f"{save_path}/depths/invdepth", exist_ok=True)
+         for idx, d in enumerate(invdepths):
+             invdepth_img = (d.squeeze(0) * 255).astype(np.uint8)
+-            cv2.imwrite(f"{save_path}/depths/invdepth/{idx}.png", invdepth_img)
++            stem = os.path.splitext(image_names[idx])[0]
++            cv2.imwrite(f"{save_path}/depths/invdepth/{stem}.png", invdepth_img)
+     
+     if absdepths:
+         os.makedirs(f"{save_path}/depths/absdepth", exist_ok=True)
+         for idx, d in enumerate(absdepths): # 保存为raw格式(float32)
+             absdepth_raw = d.squeeze(0).astype(np.float32)
+-            with open(f"{save_path}/depths/absdepth/{idx}.raw", 'wb') as f:
++            stem = os.path.splitext(image_names[idx])[0]
++            with open(f"{save_path}/depths/absdepth/{stem}.raw", 'wb') as f:
+                 f.write(absdepth_raw.tobytes())
+                 
+ def _extract_3dgs_result(scene_path, result_path, gaussians_path, use_colmap=False):
+@@ -194,20 +215,21 @@ def _apply(gaussian_path, scene_path = None, resolution = 512, render_mode: Lite
+         if extract_3dgs_result_path is not None:
+             _extract_3dgs_result(scene_path, extract_3dgs_result_path, gaussian_path, use_colmap=False)
+             print(f"[INFO] Saved: [Pretrain File]  to '{extract_3dgs_result_path}'")
+-
+     return images, invdepths, absdepths, extrinsics, intrinsics
+ 
+-def save_gaussian_result(gaussian:Gaussian, save_base, save_name):
++def save_gaussian_result(gaussian:Gaussian, save_base, save_name, processed_image=None):
+     save_path = f"{save_base}/{save_name+'/' if save_name is not None else ''}{current_time()}"
+     print(f"[PIPE] Save to: {save_path}")
+     
+     os.makedirs(save_path, exist_ok=True)
+     gaussian_path = f"{save_path}/sample.ply"
+     gaussian.save_ply(gaussian_path)
+-    
+     fov = 53.1301023542
+     resolution=1024
+     _apply(gaussian_path, os.path.join(save_path,"source"),\
+         resolution, render_mode="sphere", fov=fov, \
+         extract_3dgs_result_path=os.path.join(save_path,"model"))
++    if processed_image is not None:
++        p_image_path = os.path.join(save_path,"processed_image.png")
++        processed_image.save(p_image_path)
+     return ""
+diff --git a/trellis/utils/render_utils.py b/trellis/utils/render_utils.py
+index ae76067..416fc69 100644
+--- a/trellis/utils/render_utils.py
++++ b/trellis/utils/render_utils.py
+@@ -60,6 +60,10 @@ def get_renderer(sample, **kwargs):
+         renderer.rendering_options.ssaa = kwargs.get('ssaa', 1)
+         renderer.pipe.kernel_size = kwargs.get('kernel_size', 0.1)
+         renderer.pipe.use_mip_gaussian = True
++        # The absdepth CUDA extension used by this project does not reliably
++        # evaluate SH colors.  Convert degree-0 SH to RGB in Python so the
++        # RGB channel is populated while preserving the depth outputs.
++        renderer.pipe.convert_SHs_python = True
+     elif isinstance(sample, MeshExtractResult):
+         renderer = MeshRenderer()
+         renderer.rendering_options.resolution = kwargs.get('resolution', 512)
+@@ -190,4 +194,4 @@ def save_colmap_image_camera(image_names, extrinsics, intrinsics, resolution, fi
+             image_id = idx + 1
+             f.write(f"{image_id} {qw} {qx} {qy} {qz} {t[0]} {t[1]} {t[2]} {cam_id} {name}\n")
+             f.write("\n")
+-        # print(f"[INFO] images saved to {file_folder + '/images.txt'}")
+\ No newline at end of file
++        # print(f"[INFO] images saved to {file_folder + '/images.txt'}")

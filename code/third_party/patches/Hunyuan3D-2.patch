@@ -1,0 +1,167 @@
+diff --git a/hy3dgen/shapegen/models/autoencoders/model.py b/hy3dgen/shapegen/models/autoencoders/model.py
+index 7401d53..7fbe21a 100644
+--- a/hy3dgen/shapegen/models/autoencoders/model.py
++++ b/hy3dgen/shapegen/models/autoencoders/model.py
+@@ -171,8 +171,10 @@ class VectsetVAE(nn.Module):
+     def latents2mesh(self, latents: torch.FloatTensor, **kwargs):
+         with synchronize_timer('Volume decoding'):
+             grid_logits = self.volume_decoder(latents, self.geo_decoder, **kwargs)
++            print(f"latents2mesh: volume_decoder")
+         with synchronize_timer('Surface extraction'):
+             outputs = self.surface_extractor(grid_logits, **kwargs)
++            print(f"latents2mesh: surface_extractor")
+         return outputs
+ 
+     def enable_flashvdm_decoder(
+diff --git a/hy3dgen/shapegen/models/autoencoders/volume_decoders.py b/hy3dgen/shapegen/models/autoencoders/volume_decoders.py
+index d7bfd84..8564a0a 100644
+--- a/hy3dgen/shapegen/models/autoencoders/volume_decoders.py
++++ b/hy3dgen/shapegen/models/autoencoders/volume_decoders.py
+@@ -178,7 +178,7 @@ class VanillaVolumeDecoder:
+ 
+         grid_logits = torch.cat(batch_logits, dim=1)
+         grid_logits = grid_logits.view((batch_size, *grid_size)).float()
+-
++        print(f"VanillaVolumeDecoder finished")
+         return grid_logits
+ 
+ 
+diff --git a/hy3dgen/shapegen/pipelines.py b/hy3dgen/shapegen/pipelines.py
+index fc8acc6..8e2c25a 100755
+--- a/hy3dgen/shapegen/pipelines.py
++++ b/hy3dgen/shapegen/pipelines.py
+@@ -604,6 +604,7 @@ class Hunyuan3DDiTPipeline:
+             guidance_cond = self.get_guidance_scale_embedding(
+                 guidance_scale_tensor, embedding_dim=self.model.guidance_cond_proj_dim
+             ).to(device=device, dtype=latents.dtype)
++        print(f"pipeline: 2")
+         with synchronize_timer('Diffusion Sampling'):
+             for i, t in enumerate(tqdm(timesteps, disable=not enable_pbar, desc="Diffusion Sampling:", leave=False)):
+                 # expand the latents if we are doing classifier free guidance
+@@ -638,7 +639,7 @@ class Hunyuan3DDiTPipeline:
+                 if callback is not None and i % callback_steps == 0:
+                     step_idx = i // getattr(self.scheduler, "order", 1)
+                     callback(step_idx, t, outputs)
+-
++        print(f"pipeline: 1")
+         return self._export(
+             latents,
+             output_type,
+@@ -656,6 +657,7 @@ class Hunyuan3DDiTPipeline:
+         mc_algo='mc',
+         enable_pbar=True
+     ):
++        print(f"_export: 1")
+         if not output_type == "latent":
+             latents = 1. / self.vae.scale_factor * latents
+             latents = self.vae(latents)
+@@ -670,10 +672,10 @@ class Hunyuan3DDiTPipeline:
+             )
+         else:
+             outputs = latents
+-
++        print(f"_export: 2")
+         if output_type == 'trimesh':
+             outputs = export_to_trimesh(outputs)
+-
++        print(f"_export: 3")
+         return outputs
+ 
+ 
+diff --git a/hy3dgen/texgen/pipelines.py b/hy3dgen/texgen/pipelines.py
+index 6d6b89f..b4e16a7 100644
+--- a/hy3dgen/texgen/pipelines.py
++++ b/hy3dgen/texgen/pipelines.py
+@@ -61,7 +61,7 @@ class Hunyuan3DPaintPipeline:
+ 
+             delight_model_path = os.path.join(model_path, 'hunyuan3d-delight-v2-0')
+             multiview_model_path = os.path.join(model_path, subfolder)
+-
++            
+             if not os.path.exists(delight_model_path) or not os.path.exists(multiview_model_path):
+                 try:
+                     import huggingface_hub
+@@ -188,7 +188,6 @@ class Hunyuan3DPaintPipeline:
+ 
+     @torch.no_grad()
+     def __call__(self, mesh, image):
+-
+         if not isinstance(image, List):
+             image = [image]
+ 
+@@ -203,10 +202,12 @@ class Hunyuan3DPaintPipeline:
+         images_prompt = [self.recenter_image(image_prompt) for image_prompt in images_prompt]
+ 
+         images_prompt = [self.models['delight_model'](image_prompt) for image_prompt in images_prompt]
++        print("3dpaint pipeline: 2.0")
+ 
+         mesh = mesh_uv_wrap(mesh)
+ 
+         self.render.load_mesh(mesh)
++        print("3dpaint pipeline: 2.1")
+ 
+         selected_camera_elevs, selected_camera_azims, selected_view_weights = \
+             self.config.candidate_camera_elevs, self.config.candidate_camera_azims, self.config.candidate_view_weights
+@@ -237,4 +238,5 @@ class Hunyuan3DPaintPipeline:
+         self.render.set_texture(texture)
+         textured_mesh = self.render.save_mesh()
+ 
++        print("3dpaint pipeline: 6")
+         return textured_mesh
+diff --git a/hy3dgen/texgen/utils/dehighlight_utils.py b/hy3dgen/texgen/utils/dehighlight_utils.py
+index 9b52368..0c42466 100644
+--- a/hy3dgen/texgen/utils/dehighlight_utils.py
++++ b/hy3dgen/texgen/utils/dehighlight_utils.py
+@@ -34,6 +34,7 @@ class Light_Shadow_Remover():
+         pipeline.set_progress_bar_config(disable=True)
+ 
+         self.pipeline = pipeline.to(self.device, torch.float16)
++        print(f"Light_Shadow_Remover on {self.device}")
+     
+     def recorrect_rgb(self, src_image, target_image, alpha_channel, scale=0.95):
+         
+@@ -67,7 +68,6 @@ class Light_Shadow_Remover():
+ 
+     @torch.no_grad()
+     def __call__(self, image):
+-
+         image = image.resize((512, 512))
+ 
+         if image.mode == 'RGBA':
+@@ -89,7 +89,6 @@ class Light_Shadow_Remover():
+             rgb_target = image_tensor[:, :, :3]
+ 
+         image = image.convert('RGB')
+-
+         image = self.pipeline(
+             prompt="",
+             image=image,
+@@ -100,7 +99,6 @@ class Light_Shadow_Remover():
+             image_guidance_scale=self.cfg_image,
+             guidance_scale=self.cfg_text,
+         ).images[0]
+-
+         image_tensor = torch.tensor(np.array(image)/255.0).to(self.device)
+         rgb_src = image_tensor[:,:,:3]
+         image = self.recorrect_rgb(rgb_src, rgb_target, alpha)
+diff --git a/hy3dgen/texgen/utils/uv_warp_utils.py b/hy3dgen/texgen/utils/uv_warp_utils.py
+index f55a924..1739ab9 100644
+--- a/hy3dgen/texgen/utils/uv_warp_utils.py
++++ b/hy3dgen/texgen/utils/uv_warp_utils.py
+@@ -22,7 +22,15 @@ def mesh_uv_wrap(mesh):
+ 
+     if len(mesh.faces) > 500000000:
+         raise ValueError("The mesh has more than 500,000,000 faces, which is not supported.")
+-
++    print(f"mesh_uv_wrap: vertices={len(mesh.vertices)}, faces={len(mesh.faces)}")
++    if len(mesh.faces) > 50000:
++        print("simplifying")
++        from hy3dgen.shapegen import FaceReducer, FloaterRemover, DegenerateFaceRemover
++        print("imported")
++        mesh = FloaterRemover()(mesh)
++        mesh = DegenerateFaceRemover()(mesh)
++        mesh = FaceReducer()(mesh)
++        print(f"mesh_uv_wrap: vertices={len(mesh.vertices)}, faces={len(mesh.faces)}")
+     vmapping, indices, uvs = xatlas.parametrize(mesh.vertices, mesh.faces)
+ 
+     mesh.vertices = mesh.vertices[vmapping]

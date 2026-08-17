@@ -1,0 +1,114 @@
+diff --git a/demo.py b/demo.py
+index 9ad3fbf..db69dc2 100644
+--- a/demo.py
++++ b/demo.py
+@@ -69,9 +69,22 @@ def resize_image(image, size, interp):
+     return resized
+ 
+ 
+-def fast_make_matching_figure(data, b_id):
+-    color0 = (data['color0'][b_id].permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)  # (rH, rW, 3)
+-    color1 = (data['color1'][b_id].permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)  # (rH, rW, 3)
++def fast_make_matching_figure(
++    data, b_id=0, override_color0=None, override_color1=None
++):
++    # override             : torch(1,3,h,w)float32
++    # data['color0'][b_id] : torch(3,h,w)float32
++    # color                : numpy(h, w, 3)uint8
++    if override_color0 is not None:
++        color0 = override_color0.squeeze(0)
++        print("using override color 0")
++    else: color0 = data['color0'][b_id]
++    if override_color1 is not None:
++        color1 = override_color1.squeeze(0)
++        print("using override color 1")
++    else: color1 = data['color1'][b_id]
++    color0 = (color0.permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)  # (rH, rW, 3)
++    color1 = (color1.permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)  # (rH, rW, 3)
+     gray0 = cv2.cvtColor(color0, cv2.COLOR_RGB2GRAY)
+     gray1 = cv2.cvtColor(color1, cv2.COLOR_RGB2GRAY)
+     kpts0 = data['mkpts0_f'].cpu().detach().numpy()
+@@ -107,7 +120,7 @@ def fast_make_matching_figure(data, b_id):
+ 
+     return out
+ 
+-
++# 绘制连接线
+ def fast_make_matching_overlay(data, b_id):
+     color0 = (data['color0'][b_id].permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)  # (rH, rW, 3)
+     color1 = (data['color1'][b_id].permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)  # (rH, rW, 3)
+@@ -147,6 +160,49 @@ def fast_make_matching_overlay(data, b_id):
+ 
+     return out
+ 
++# 创建一个左右并排的图像匹配可视化结果，中间无间隙
++def make_matching_figure_no_gap(data, b_id=0):
++
++    # 提取图像数据并转换为OpenCV格式（BGR）
++    color0 = (data['color0'][b_id].permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)
++    color1 = (data['color1'][b_id].permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)
++    
++    # 确保图像是BGR格式（OpenCV默认格式）
++    if color0.shape[2] == 3: color0 = cv2.cvtColor(color0, cv2.COLOR_RGB2BGR)
++    if color1.shape[2] == 3: color1 = cv2.cvtColor(color1, cv2.COLOR_RGB2BGR)
++    
++    # 获取图像尺寸
++    h0, w0 = color0.shape[:2]
++    h1, w1 = color1.shape[:2]
++    
++    # 确保两张图像高度一致（必要时进行缩放）
++    if h0 != h1:
++        h = max(h0, h1)
++        color0 = cv2.resize(color0, (w0, h))
++        color1 = cv2.resize(color1, (w1, h))
++        h0 = h1 = h
++    
++    # 创建画布，宽度为两张图之和，高度为图高
++    H, W = h0, w0 + w1
++    out = np.zeros((H, W, 3), dtype=np.uint8)
++    
++    # 将两张图像放置在画布上（无间隙）
++    out[:, :w0] = color0
++    out[:, w0:] = color1
++    
++    # 提取匹配点
++    kpts0 = data['mkpts0_f'].cpu().detach().numpy()
++    kpts1 = data['mkpts1_f'].cpu().detach().numpy()
++    inliers = data['inliers']
++    
++    # 绘制匹配连接线和标记点
++    for (x0, y0), (x1, y1) in zip(kpts0[inliers], kpts1[inliers]):
++        pt0 = (int(x0), int(y0))
++        pt1 = (int(x1) + w0, int(y1))
++        cv2.line(out, pt0, pt1, color=(0, 255, 0), thickness=1, lineType=cv2.LINE_AA)
++        cv2.circle(out, pt0, 3, (0, 255, 0), -1, lineType=cv2.LINE_AA)
++        cv2.circle(out, pt1, 3, (0, 255, 0), -1, lineType=cv2.LINE_AA)
++    return out
+ 
+ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = None,
+                dfactor: int = 8):
+@@ -244,7 +300,7 @@ def wrap_images(img0, img1, geo_info, geom_type):
+         rectified_image1 = cv2.warpPerspective(
+             img1, H, (img0.shape[1], img0.shape[0])
+         )
+-        title = ["Image 0", "Image 1 - warped"]
++        title = ["Image 0", "Image 1 - warped (validation color marked)"]
+     elif geom_type == "Fundamental":
+         H1, H2 = np.array(geo_info["H1"]), np.array(geo_info["H2"])
+         rectified_image0 = cv2.warpPerspective(img0, H1, (w1, h1))
+@@ -538,3 +594,8 @@ if __name__ == '__main__':
+     wrapped_images = wrap_images(image0, image1, geom_info,
+                                  "Homography")
+     cv2.imwrite(join(image_dir, f'{name0}_{name1}_{args.model}_warp.png'), wrapped_images)
++    print(
++        "GIM_DEMO_READY",
++        join(image_dir, f'{name0}_{name1}_{args.model}_match.png'),
++        join(image_dir, f'{name0}_{name1}_{args.model}_warp.png'),
++    )
+diff --git a/video_list.txt b/video_list.txt
+deleted file mode 100644
+index 428eda1..0000000
+--- a/video_list.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-Od-rKbC30TM
