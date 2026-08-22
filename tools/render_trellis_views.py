@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Render a TRELLIS Gaussian from explicit yaw/pitch/distance views.
+"""Render a TRELLIS Gaussian from explicit orbit cameras.
 
-The InsertAny3D pose workflow needs the generated object rendered from the
-same center view and +/- side yaw views used by Unity.  The existing sphere
-renderer remains useful for NVS datasets; this small entry point writes a
-three-view (or arbitrary explicit-view) COLMAP/3DGS directory instead.
+Without ``--unity-camera`` this is a canonical-space orbit renderer: every
+camera looks at the canonical origin and uses the requested yaw, pitch,
+distance, and FOV.  The optional Unity-camera path is reserved for pose
+refinement and is kept separate from canonical SAGS ring views.
 """
 
 from __future__ import annotations
@@ -290,7 +290,12 @@ def main() -> int:
         extrinsics, intrinsics = yaw_pitch_r_fov_to_extrinsics_intrinsics(
             yaws, pitches, args.distance, args.fov
         )
-        camera_metadata = {"mode": "explicit_yaw_pitch"}
+        camera_metadata = {
+            "mode": "canonical_yaw_pitch",
+            "coordinateSpace": "trellis_canonical",
+            "poseSource": "none",
+            "target": "origin",
+        }
         effective_near, effective_far = args.near, args.far
     rendered = render_frames(
         gaussian,
@@ -304,6 +309,17 @@ def main() -> int:
             "bg_color": (0, 0, 0),
         },
     )
+    if not args.unity_camera:
+        empty_views = [
+            name for name, image in zip(names, rendered["color"])
+            if not np.any(np.asarray(image) > 0)
+        ]
+        if empty_views:
+            raise RuntimeError(
+                "canonical 渲染出现全黑视角: "
+                + ", ".join(empty_views)
+                + "; 请增大 distance 或调整 fov"
+            )
     image_names = [f"{name}.png" for name in names]
     scene_path = args.output_dir / "source"
     model_path = args.output_dir / "model"

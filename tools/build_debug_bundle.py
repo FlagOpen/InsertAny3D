@@ -529,7 +529,8 @@ def write_readme(task_bundle: Path) -> None:
         "- `02_trellis/`：TRELLIS 输入、sample.ply/sample.glb、Gaussian 渲染 RGB/深度/相机。\n"
         "- `03_gim/<view>_pair/`：每个视角的 RGB 匹配、深度有效点、最终接受/拒绝点和 `match_2x2.png`。\n"
         "- `03_gim/multiview_summary.png/json`：单视角拟合、交叉验证、留一验证和联合位姿门禁。\n"
-        "- `04_sags/`：SAGS 输入标注（mask、annotated、points）和所有结果 PLY/预览。\n"
+        "- `04_sags/ring6_views/`：SAGS 六视角环拍的 RGB、深度、相机和 Gaussian 渲染模型。\n"
+        "- `04_sags/`：SAGS 输入标注（每视角 mask、annotated、points）、几何先验门控诊断和所有结果 PLY/预览。\n"
         "- `05_pose/`：姿态估计及候选姿态。\n"
         "- `06_logs/`：阶段日志、pipeline manifest，以及当前 run 的唯一 evidence。\n"
         "- `99_raw_pipeline/`：未裁剪的原始任务输出，可能包含历史 run。\n\n"
@@ -565,6 +566,10 @@ def process_task(task_source: Path, task_bundle: Path, args: argparse.Namespace,
         for name in ("sample.glb", "manifest.json", "processed_00.png"):
             copy_file(sample_ply.parent / name, task_bundle / "02_trellis" / "input_and_asset" / name)
     copy_tree(task_source / "03_rendered_3dgs", task_bundle / "02_trellis" / "gaussian_render")
+    # Keep the independent SAGS camera set next to its annotations.  The
+    # original task is also copied below, but this curated location makes it
+    # possible to compare all six RGB/depth views without opening 99_raw_pipeline.
+    copy_tree(task_source / "03_sags_views", task_bundle / "04_sags" / "ring6_views")
     copy_tree(task_source / "01_segmentation", task_bundle / "04_sags" / "input_annotation")
     copy_tree(task_source / "06_sags", task_bundle / "04_sags" / "results")
     copy_tree(task_source / "05_pose", task_bundle / "05_pose")
@@ -682,8 +687,12 @@ def main() -> int:
         print(f"[debug-bundle] {task_id}", flush=True)
         result = process_task(source, output_root / task_id, args, env)
         results.append(result)
-    for name in ("batch_manifest.json", "batch.console.log", "insert_jobs.json"):
+    for name in (
+        "batch_manifest.json", "batch.console.log", "insert_jobs.json",
+        "workflow.remote.log", "workflow.started", "workflow.exit", "workflow.pid",
+    ):
         copy_file(run_root / name, output_root / "00_batch_metadata" / name)
+    copy_tree(run_root / "workflow_attempts", output_root / "00_batch_metadata" / "workflow_attempts")
     root_manifest = {
         "schemaVersion": 1,
         "generatedAtUtc": datetime.now(timezone.utc).isoformat(),

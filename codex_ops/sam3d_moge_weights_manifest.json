@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "source": "huggingface",
+  "modelId": "Ruicheng/moge-vitl",
+  "revision": "ad326bfb61facd6c52b5a825bc1e34d7c97d9672",
+  "file": "model.pt",
+  "bytes": 1256823446,
+  "sha256": "da96b09a0485a3c45a5aa455e67743c8b4efc4dd8437c1f2aa93c2b4303d957f",
+  "localPath": "third_party/SAM3D-Objects/checkpoints/modelscope/moge-vitl-model.pt",
+  "retrievedAt": "2026-08-21",
+  "tokenRecorded": false
+}

@@ -13,11 +13,12 @@ import argparse
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
 
@@ -49,6 +50,17 @@ class ViewPoints:
     match_indices: np.ndarray
     scene_pixels: np.ndarray
     generated_pixels: np.ndarray
+    scene_size: tuple[int, int]
+    generated_size: tuple[int, int]
+
+
+@dataclass
+class ViewSelection:
+    raw: ViewPoints
+    anchor_mask: np.ndarray
+    cross_view_mask: np.ndarray
+    support_counts: np.ndarray
+    anchor: dict[str, Any]
 
 
 @dataclass
@@ -81,23 +93,25 @@ def parse_args() -> argparse.Namespace:
         default="identity",
         help="应用到反投影 generated world 点的坐标转换；identity 对应当前导出的 point_cloud.ply",
     )
-    parser.add_argument("--max-matches-per-view", type=int, default=1000)
+    parser.add_argument("--max-matches-per-view", type=int, default=0)
     parser.add_argument("--min-depth", type=float, default=1e-6)
     parser.add_argument("--max-depth-relative-spread", type=float, default=0.1, help="双线性采样四邻域允许的最大相对深度跨度；0 表示关闭")
     parser.add_argument("--ransac-threshold", type=float, default=0.1, help="Unity 世界单位")
-    parser.add_argument("--ransac-iterations", type=int, default=2000)
+    parser.add_argument("--ransac-iterations", type=int, default=3000)
     parser.add_argument("--min-inliers", type=int, default=6)
     parser.add_argument("--min-view-inliers", type=int, default=6, help="联合位姿中每个视角至少贡献的内点数")
     parser.add_argument("--min-view-inlier-ratio", type=float, default=0.01, help="联合位姿中每个视角的最小内点比例")
-    parser.add_argument("--min-cross-view-inliers", type=int, default=3, help="留一视角验证的最小支持点数")
-    parser.add_argument("--min-cross-view-ratio", type=float, default=0.005, help="留一视角验证的最小支持比例")
+    parser.add_argument("--anchor-masks-dir", type=Path, help="按 VIEW/scene|generated/mask.png 保存的锚点 mask 根目录")
+    parser.add_argument("--anchor-mask-dilation", type=int, default=16, help="选中锚点实例后的 mask 膨胀半径，像素")
+    parser.add_argument("--cross-view-neighbors", type=int, default=16, help="两个三维空间各自查询的近邻数量")
+    parser.add_argument("--cross-view-min-support", type=int, default=2, help="优先要求一个点得到多少个其他视图支持")
+    parser.add_argument("--cross-view-fallback-support", type=int, default=1, help="严格筛选点数不足时的支持数")
+    parser.add_argument("--min-consistent-points", type=int, default=30, help="跨视图一致点总数下限")
+    parser.add_argument("--min-consistent-view-points", type=int, default=6, help="每个视图的跨视图一致点下限")
     parser.add_argument("--spatial-grid-size", type=int, default=8, help="按场景图网格均匀选择匹配点；1 表示关闭")
     parser.add_argument("--no-quality-gate", action="store_true", help="仍生成验证统计，但不因多视角不一致拒绝输出")
     parser.add_argument("--allow-single-view", action="store_true", help="允许单视角输出 ready；粗位姿阶段使用")
-    parser.add_argument(
-        "--primary-view-name",
-        help="主视图验证模式：联合解仍要求每个输入视图支持，且主视图独立解必须得到至少一个其他视图佐证",
-    )
+    parser.add_argument("--primary-view-name", help=argparse.SUPPRESS)
     parser.add_argument("--exit-zero-on-rejected", action="store_true", help="被质量门禁拒绝时仍返回 0，便于批处理保留诊断")
     parser.add_argument("--diagnostics-dir", type=Path, help="写入 multiview_summary.json/png 和逐视角图")
     parser.add_argument("--run-id", help="写入结果的数据运行 ID")
@@ -479,7 +493,214 @@ def _load_view_points(
         match_indices=np.asarray(accepted_indices, dtype=np.int64),
         scene_pixels=np.asarray(scene_pixels, dtype=np.float64).reshape((-1, 2)) if scene_pixels else empty_pixels.copy(),
         generated_pixels=np.asarray(generated_pixels, dtype=np.float64).reshape((-1, 2)) if generated_pixels else empty_pixels.copy(),
+        scene_size=(unity_camera.width, unity_camera.height),
+        generated_size=(generated_camera.width, generated_camera.height),
     )
+
+
+def _subset_view(view: ViewPoints, mask: np.ndarray) -> ViewPoints:
+    mask = np.asarray(mask, dtype=bool).reshape(-1)
+    if len(mask) != view.depth_valid:
+        raise ValueError(f"{view.name} 筛选 mask 长度不一致")
+    return replace(
+        view,
+        source=view.source[mask],
+        target=view.target[mask],
+        confidence=view.confidence[mask],
+        depth_valid=int(mask.sum()),
+        match_indices=view.match_indices[mask],
+        scene_pixels=view.scene_pixels[mask],
+        generated_pixels=view.generated_pixels[mask],
+    )
+
+
+def _sample_labels(labels: np.ndarray, pixels: np.ndarray, reference_size: tuple[int, int]) -> np.ndarray:
+    if not len(pixels):
+        return np.empty(0, dtype=np.int32)
+    height, width = labels.shape
+    reference_width, reference_height = reference_size
+    x = np.rint(pixels[:, 0] * width / max(1, reference_width)).astype(np.int64)
+    y = np.rint(pixels[:, 1] * height / max(1, reference_height)).astype(np.int64)
+    x = np.clip(x, 0, width - 1)
+    y = np.clip(y, 0, height - 1)
+    return labels[y, x]
+
+
+def _load_component_labels(path: Path) -> tuple[np.ndarray, int]:
+    import cv2
+
+    mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise FileNotFoundError(path)
+    count, labels = cv2.connectedComponents((mask > 0).astype(np.uint8), connectivity=8)
+    return labels, count - 1
+
+
+def _write_selected_component(path: Path, labels: np.ndarray, component: int, dilation: int) -> np.ndarray:
+    import cv2
+
+    selected = (labels == component).astype(np.uint8)
+    if dilation > 0:
+        size = 2 * dilation + 1
+        selected = cv2.dilate(selected, np.ones((size, size), dtype=np.uint8))
+    output = selected * 255
+    cv2.imwrite(str(path), output)
+    return selected.astype(bool)
+
+
+def _select_anchor_points(
+    views: list[ViewPoints],
+    args: argparse.Namespace,
+) -> tuple[list[ViewPoints], dict[str, ViewSelection]]:
+    selections: dict[str, ViewSelection] = {}
+    selected_views: list[ViewPoints] = []
+    for view in views:
+        keep = np.ones(view.depth_valid, dtype=bool)
+        metadata: dict[str, Any] = {"status": "disabled"}
+        if args.anchor_masks_dir:
+            scene_path = args.anchor_masks_dir / view.name / "scene" / "mask.png"
+            generated_path = args.anchor_masks_dir / view.name / "generated" / "mask.png"
+            scene_labels, scene_count = _load_component_labels(scene_path)
+            generated_labels, generated_count = _load_component_labels(generated_path)
+            scene_ids = _sample_labels(scene_labels, view.scene_pixels, view.scene_size)
+            generated_ids = _sample_labels(generated_labels, view.generated_pixels, view.generated_size)
+            best: Optional[tuple[tuple[int, float], int, int, np.ndarray]] = None
+            for scene_component in range(1, scene_count + 1):
+                for generated_component in range(1, generated_count + 1):
+                    hits = (scene_ids == scene_component) & (generated_ids == generated_component)
+                    score = (int(hits.sum()), float(view.confidence[hits].sum()))
+                    if best is None or score > best[0]:
+                        best = (score, scene_component, generated_component, hits)
+            if best is None or best[0][0] == 0:
+                keep = np.zeros(view.depth_valid, dtype=bool)
+                metadata = {
+                    "status": "no_linked_component",
+                    "sceneMask": str(scene_path.resolve()),
+                    "generatedMask": str(generated_path.resolve()),
+                    "sceneComponents": scene_count,
+                    "generatedComponents": generated_count,
+                }
+            else:
+                _, scene_component, generated_component, _ = best
+                selected_scene = _write_selected_component(
+                    scene_path.with_name("selected.png"), scene_labels, scene_component, args.anchor_mask_dilation
+                )
+                selected_generated = _write_selected_component(
+                    generated_path.with_name("selected.png"), generated_labels, generated_component, args.anchor_mask_dilation
+                )
+                keep = (
+                    _sample_labels(selected_scene.astype(np.int32), view.scene_pixels, view.scene_size) > 0
+                ) & (
+                    _sample_labels(selected_generated.astype(np.int32), view.generated_pixels, view.generated_size) > 0
+                )
+                metadata = {
+                    "status": "ready",
+                    "sceneMask": str(scene_path.resolve()),
+                    "generatedMask": str(generated_path.resolve()),
+                    "selectedSceneMask": str(scene_path.with_name("selected.png").resolve()),
+                    "selectedGeneratedMask": str(generated_path.with_name("selected.png").resolve()),
+                    "sceneComponents": scene_count,
+                    "generatedComponents": generated_count,
+                    "selectedSceneComponent": scene_component,
+                    "selectedGeneratedComponent": generated_component,
+                    "linkedMatchesBeforeDilation": best[0][0],
+                    "linkedConfidenceBeforeDilation": best[0][1],
+                    "dilationPixels": args.anchor_mask_dilation,
+                }
+        selections[view.name] = ViewSelection(
+            raw=view,
+            anchor_mask=keep.copy(),
+            cross_view_mask=np.zeros(view.depth_valid, dtype=bool),
+            support_counts=np.full(view.depth_valid, -1, dtype=np.int16),
+            anchor=metadata,
+        )
+        selected_views.append(_subset_view(view, keep))
+    return selected_views, selections
+
+
+def _neighbor_intersection_support(query: ViewPoints, reference: ViewPoints, neighbors: int) -> np.ndarray:
+    if not query.depth_valid or not reference.depth_valid:
+        return np.zeros(query.depth_valid, dtype=bool)
+    count = min(neighbors, reference.depth_valid)
+    target_indices = cKDTree(reference.target).query(query.target, k=count)[1]
+    source_indices = cKDTree(reference.source).query(query.source, k=count)[1]
+    if count == 1:
+        target_indices = target_indices[:, None]
+        source_indices = source_indices[:, None]
+    return np.fromiter(
+        (bool(np.intersect1d(target_row, source_row, assume_unique=False).size)
+         for target_row, source_row in zip(target_indices, source_indices)),
+        dtype=bool,
+        count=query.depth_valid,
+    )
+
+
+def _selection_is_sufficient(counts: list[int], args: argparse.Namespace) -> bool:
+    return (
+        sum(counts) >= args.min_consistent_points
+        and bool(counts)
+        and all(count >= args.min_consistent_view_points for count in counts)
+    )
+
+
+def _select_cross_view_points(
+    anchor_views: list[ViewPoints],
+    selections: dict[str, ViewSelection],
+    args: argparse.Namespace,
+) -> tuple[list[ViewPoints], dict[str, Any]]:
+    active_count = sum(view.depth_valid > 0 for view in anchor_views)
+    if active_count < 2:
+        for view in anchor_views:
+            selection = selections[view.name]
+            selection.cross_view_mask = selection.anchor_mask.copy()
+            selection.support_counts[selection.anchor_mask] = 0
+        return anchor_views, {
+            "status": "single_view",
+            "usedSupport": 0,
+            "fallbackUsed": False,
+            "selectedPerView": {view.name: view.depth_valid for view in anchor_views},
+        }
+
+    support_by_view: dict[str, np.ndarray] = {}
+    for view in anchor_views:
+        support = np.zeros(view.depth_valid, dtype=np.int16)
+        for reference in anchor_views:
+            if reference is view or not reference.depth_valid:
+                continue
+            support += _neighbor_intersection_support(view, reference, args.cross_view_neighbors)
+        support_by_view[view.name] = support
+
+    available_support = max(1, active_count - 1)
+    strict_support = min(args.cross_view_min_support, available_support)
+    fallback_support = min(args.cross_view_fallback_support, available_support)
+    strict_masks = [support_by_view[view.name] >= strict_support for view in anchor_views]
+    strict_counts = [int(mask.sum()) for mask in strict_masks]
+    fallback_used = not _selection_is_sufficient(strict_counts, args)
+    used_support = fallback_support if fallback_used else strict_support
+    masks = [support_by_view[view.name] >= used_support for view in anchor_views]
+    counts = [int(mask.sum()) for mask in masks]
+
+    result: list[ViewPoints] = []
+    for view, mask in zip(anchor_views, masks):
+        selection = selections[view.name]
+        raw_anchor_indices = np.flatnonzero(selection.anchor_mask)
+        selection.support_counts[raw_anchor_indices] = support_by_view[view.name]
+        selection.cross_view_mask[raw_anchor_indices[mask]] = True
+        result.append(_subset_view(view, mask))
+    return result, {
+        "status": "ready" if _selection_is_sufficient(counts, args) else "insufficient",
+        "neighbors": args.cross_view_neighbors,
+        "strictSupport": strict_support,
+        "fallbackSupport": fallback_support,
+        "usedSupport": used_support,
+        "fallbackUsed": fallback_used,
+        "strictSelectedPerView": {
+            view.name: count for view, count in zip(anchor_views, strict_counts)
+        },
+        "selectedPerView": {view.name: count for view, count in zip(anchor_views, counts)},
+        "minConsistentPoints": args.min_consistent_points,
+        "minConsistentViewPoints": args.min_consistent_view_points,
+    }
 
 
 def _umeyama(
@@ -640,20 +861,6 @@ def _transform_json(fit: SimilarityFit) -> dict[str, Any]:
     }
 
 
-def _score_transform(view: ViewPoints, fit: SimilarityFit, threshold: float) -> dict[str, Any]:
-    if not view.depth_valid:
-        return {"supportCount": 0, "supportRatio": 0.0, "residualMedian": None, "residualMean": None}
-    residuals = _residuals(view.source, view.target, fit.rotation, fit.translation, fit.scale)
-    mask = residuals <= threshold
-    accepted = residuals[mask]
-    return {
-        "supportCount": int(mask.sum()),
-        "supportRatio": float(mask.mean()),
-        "residualMedian": float(np.median(accepted)) if len(accepted) else None,
-        "residualMean": float(accepted.mean()) if len(accepted) else None,
-    }
-
-
 def _local_masks(views: list[ViewPoints], fit: SimilarityFit) -> dict[str, np.ndarray]:
     result: dict[str, np.ndarray] = {}
     start = 0
@@ -670,63 +877,7 @@ def _build_validation(
     args: argparse.Namespace,
     views: list[ViewPoints],
     joint: SimilarityFit,
-) -> tuple[dict[str, Any], dict[str, SimilarityFit], dict[str, np.ndarray]]:
-    independent: dict[str, SimilarityFit] = {}
-    independent_json: dict[str, Any] = {}
-    cross_matrix: dict[str, dict[str, Any]] = {}
-    for index, view in enumerate(views):
-        if view.depth_valid < max(3, args.min_inliers):
-            independent_json[view.name] = {"status": "unavailable", "reason": "insufficient_depth_valid_points"}
-            continue
-        try:
-            fit = _fit_views([view], args, args.seed + 1000 + index)
-        except ValueError as exc:
-            independent_json[view.name] = {"status": "failed", "reason": str(exc)}
-            continue
-        independent[view.name] = fit
-        independent_json[view.name] = {"status": "ready", **_transform_json(fit)}
-        cross_matrix[view.name] = {
-            target.name: _score_transform(target, fit, args.ransac_threshold)
-            for target in views
-        }
-
-    leave_one_out: dict[str, Any] = {}
-    for index, held_out in enumerate(views):
-        training = [view for view in views if view is not held_out and view.depth_valid]
-        if not training:
-            leave_one_out[held_out.name] = {"status": "unavailable", "reason": "no_training_views"}
-            continue
-        try:
-            fit = _fit_views(training, args, args.seed + 2000 + index)
-            leave_one_out[held_out.name] = {
-                "status": "ready",
-                "trainingViews": [view.name for view in training],
-                "heldOut": _score_transform(held_out, fit, args.ransac_threshold),
-                "transform": _transform_json(fit),
-            }
-        except ValueError as exc:
-            leave_one_out[held_out.name] = {
-                "status": "failed",
-                "trainingViews": [view.name for view in training],
-                "reason": str(exc),
-            }
-
-    disagreements = []
-    names = list(independent)
-    for left_index, left_name in enumerate(names):
-        for right_name in names[left_index + 1 :]:
-            left, right = independent[left_name], independent[right_name]
-            relative = left.rotation @ right.rotation.T
-            angle = math.degrees(Rotation.from_matrix(relative).magnitude())
-            disagreements.append(
-                {
-                    "views": [left_name, right_name],
-                    "scaleRatio": float(max(left.scale, right.scale) / min(left.scale, right.scale)),
-                    "rotationDegrees": float(angle),
-                    "translationDistance": float(np.linalg.norm(left.translation - right.translation)),
-                }
-            )
-
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     joint_masks = _local_masks(views, joint)
     joint_views: dict[str, Any] = {}
     rejection_reasons: list[str] = []
@@ -748,57 +899,21 @@ def _build_validation(
             if ratio < args.min_view_inlier_ratio:
                 rejection_reasons.append(f"{view.name}:joint_ratio={ratio:.6g}<{args.min_view_inlier_ratio:.6g}")
 
-    primary_view = args.primary_view_name.strip().lower() if args.primary_view_name else None
-    corroborating_views: list[str] = []
     if len(views) < 2 and not (args.allow_single_view or args.no_quality_gate):
         rejection_reasons.append("single_view_not_allowed")
-    if len(views) >= 2 and not args.no_quality_gate:
-        if primary_view:
-            primary_scores = cross_matrix.get(primary_view)
-            if primary_scores is None:
-                rejection_reasons.append(f"{primary_view}:primary_fit_unavailable")
-            else:
-                for view in views:
-                    if view.name == primary_view:
-                        continue
-                    score = primary_scores.get(view.name, {})
-                    count = int(score.get("supportCount", 0))
-                    ratio = float(score.get("supportRatio", 0.0))
-                    if count >= args.min_cross_view_inliers and ratio >= args.min_cross_view_ratio:
-                        corroborating_views.append(view.name)
-                if not corroborating_views:
-                    rejection_reasons.append(f"{primary_view}:no_corroborating_view")
-        else:
-            for view in views:
-                result = leave_one_out.get(view.name, {})
-                held_out = result.get("heldOut", {}) if result.get("status") == "ready" else {}
-                count = int(held_out.get("supportCount", 0))
-                ratio = float(held_out.get("supportRatio", 0.0))
-                if count < args.min_cross_view_inliers:
-                    rejection_reasons.append(f"{view.name}:cross_inliers={count}<{args.min_cross_view_inliers}")
-                if ratio < args.min_cross_view_ratio:
-                    rejection_reasons.append(f"{view.name}:cross_ratio={ratio:.6g}<{args.min_cross_view_ratio:.6g}")
 
     validation = {
         "status": "rejected" if rejection_reasons else "ready",
         "qualityGateEnabled": not args.no_quality_gate,
-        "policy": "primary_with_corroboration" if primary_view else "all_leave_one_out",
-        "primaryView": primary_view,
-        "corroboratingViews": corroborating_views,
+        "policy": "point_consistency_joint_fit",
         "thresholds": {
             "minViewInliers": args.min_view_inliers,
             "minViewInlierRatio": args.min_view_inlier_ratio,
-            "minCrossViewInliers": args.min_cross_view_inliers,
-            "minCrossViewRatio": args.min_cross_view_ratio,
         },
         "rejectionReasons": rejection_reasons,
         "jointPerView": joint_views,
-        "independentFits": independent_json,
-        "crossValidation": cross_matrix,
-        "leaveOneOut": leave_one_out,
-        "transformDisagreement": disagreements,
     }
-    return validation, independent, joint_masks
+    return validation, joint_masks
 
 
 def _draw_match_panel(
@@ -846,7 +961,7 @@ def _draw_match_panel(
 def _write_diagnostic_images(
     output_dir: Path,
     views: list[ViewPoints],
-    independent: dict[str, SimilarityFit],
+    selections: dict[str, ViewSelection],
     joint_masks: dict[str, np.ndarray],
     validation: dict[str, Any],
 ) -> None:
@@ -855,41 +970,51 @@ def _write_diagnostic_images(
     except ImportError:
         return
     view_canvases: list[np.ndarray] = []
-    for view in views:
-        image0 = cv2.imread(view.files.get("scene_image", ""), cv2.IMREAD_COLOR)
-        image1 = cv2.imread(view.files.get("generated_image", ""), cv2.IMREAD_COLOR)
+    final_by_name = {view.name: view for view in views}
+    for name, selection in selections.items():
+        raw = selection.raw
+        view = final_by_name.get(name, _subset_view(raw, np.zeros(raw.depth_valid, dtype=bool)))
+        image0 = cv2.imread(raw.files.get("scene_image", ""), cv2.IMREAD_COLOR)
+        image1 = cv2.imread(raw.files.get("generated_image", ""), cv2.IMREAD_COLOR)
         if image0 is None or image1 is None:
             image0 = np.zeros((256, 256, 3), dtype=np.uint8)
             image1 = np.zeros((256, 256, 3), dtype=np.uint8)
-        independent_mask = independent[view.name].inliers if view.name in independent else np.zeros(view.depth_valid, dtype=bool)
         panels = [
             _draw_match_panel(
                 image0,
                 image1,
-                view.geometric_scene_pixels,
-                view.geometric_generated_pixels,
+                raw.geometric_scene_pixels,
+                raw.geometric_generated_pixels,
                 None,
-                f"{view.name.upper()} RAW GEOMETRIC ({view.geometric_inliers})",
+                f"{name.upper()} GIM GEOMETRIC ({raw.geometric_inliers})",
+            ),
+            _draw_match_panel(
+                image0,
+                image1,
+                raw.scene_pixels,
+                raw.generated_pixels,
+                selection.anchor_mask,
+                f"{name.upper()} ANCHOR MASK ({int(selection.anchor_mask.sum())}/{raw.depth_valid})",
+            ),
+            _draw_match_panel(
+                image0,
+                image1,
+                raw.scene_pixels,
+                raw.generated_pixels,
+                selection.cross_view_mask,
+                f"{name.upper()} CROSS-VIEW ({int(selection.cross_view_mask.sum())}/{raw.depth_valid})",
             ),
             _draw_match_panel(
                 image0,
                 image1,
                 view.scene_pixels,
                 view.generated_pixels,
-                independent_mask,
-                f"{view.name.upper()} INDEPENDENT 3D ({int(independent_mask.sum())}/{view.depth_valid})",
-            ),
-            _draw_match_panel(
-                image0,
-                image1,
-                view.scene_pixels,
-                view.generated_pixels,
-                joint_masks[view.name],
-                f"{view.name.upper()} JOINT 3D ({int(joint_masks[view.name].sum())}/{view.depth_valid})",
+                joint_masks.get(name, np.zeros(view.depth_valid, dtype=bool)),
+                f"{name.upper()} JOINT FIT ({int(joint_masks.get(name, np.empty(0)).sum())}/{view.depth_valid})",
             ),
         ]
         canvas = np.vstack(panels)
-        cv2.imwrite(str(output_dir / f"{view.name}_validation.png"), canvas)
+        cv2.imwrite(str(output_dir / f"{name}_validation.png"), canvas)
         view_canvases.append(canvas)
     if not view_canvases:
         return
@@ -899,22 +1024,19 @@ def _write_diagnostic_images(
         for canvas in view_canvases
     ]
     summary = np.hstack(normalized)
-    text_height = 250
+    text_height = 180
     text_panel = np.zeros((text_height, summary.shape[1], 3), dtype=np.uint8)
     status_color = (60, 220, 80) if validation["status"] == "ready" else (50, 70, 230)
-    cv2.putText(text_panel, f"MULTIVIEW GATE: {validation['status'].upper()}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.72, status_color, 2, cv2.LINE_AA)
+    cv2.putText(text_panel, f"POINT CONSISTENCY + ONE JOINT FIT: {validation['status'].upper()}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.72, status_color, 2, cv2.LINE_AA)
     x = 12
     y = 58
-    for source_name, row in validation.get("crossValidation", {}).items():
-        values = "  ".join(
-            f"{target}:{int(score.get('supportCount', 0))}/{float(score.get('supportRatio', 0.0)):.3f}"
-            for target, score in row.items()
-        )
-        cv2.putText(text_panel, f"fit {source_name} -> {values}", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (230, 230, 230), 1, cv2.LINE_AA)
-        y += 24
-    for held_name, result in validation.get("leaveOneOut", {}).items():
-        held = result.get("heldOut", {})
-        line = f"leave-out {held_name}: {int(held.get('supportCount', 0))}/{float(held.get('supportRatio', 0.0)):.3f}"
+    consistency = validation.get("pointConsistency", {})
+    selected = consistency.get("selectedPerView", {})
+    line = "cross-view selected: " + "  ".join(f"{name}:{count}" for name, count in selected.items())
+    cv2.putText(text_panel, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (230, 230, 230), 1, cv2.LINE_AA)
+    y += 24
+    for name, result in validation.get("jointPerView", {}).items():
+        line = f"joint {name}: {int(result.get('poseInliers', 0))}/{int(result.get('depthValid', 0))}"
         cv2.putText(text_panel, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 210, 210), 1, cv2.LINE_AA)
         y += 24
     reasons = validation.get("rejectionReasons", [])
@@ -933,7 +1055,7 @@ def _write_result(
     views: list[ViewPoints],
     joint: SimilarityFit,
     validation: dict[str, Any],
-    independent: dict[str, SimilarityFit],
+    selections: dict[str, ViewSelection],
     joint_masks: dict[str, np.ndarray],
 ) -> dict[str, Any]:
     rotation, translation, scale = joint.rotation, joint.translation, joint.scale
@@ -946,6 +1068,8 @@ def _write_result(
     view_results = []
     diagnostics_views = []
     for view in views:
+        selection = selections[view.name]
+        raw = selection.raw
         local_mask = joint_masks[view.name]
         local_residuals = _residuals(view.source, view.target, rotation, translation, scale) if view.depth_valid else np.empty(0)
         accepted = local_residuals[local_mask]
@@ -954,6 +1078,9 @@ def _write_result(
                 "name": view.name,
                 "inputMatches": view.input_matches,
                 "geometricInliers": view.geometric_inliers,
+                "depthValidBeforeFiltering": raw.depth_valid,
+                "anchorSelected": int(selection.anchor_mask.sum()),
+                "crossViewSelected": int(selection.cross_view_mask.sum()),
                 "depthValid": view.depth_valid,
                 "poseInliers": int(local_mask.sum()),
                 "poseResidualMedian": float(np.median(accepted)) if len(accepted) else None,
@@ -961,18 +1088,23 @@ def _write_result(
                 "fileDigests": view.file_digests,
             }
         )
-        independent_mask = independent[view.name].inliers if view.name in independent else np.zeros(view.depth_valid, dtype=bool)
         diagnostics_views.append(
             {
                 "name": view.name,
-                "geometricScenePixels": view.geometric_scene_pixels.tolist(),
-                "geometricGeneratedPixels": view.geometric_generated_pixels.tolist(),
+                "geometricScenePixels": raw.geometric_scene_pixels.tolist(),
+                "geometricGeneratedPixels": raw.geometric_generated_pixels.tolist(),
+                "rawDepthValidMatchIndices": raw.match_indices.tolist(),
+                "rawDepthValidScenePixels": raw.scene_pixels.tolist(),
+                "rawDepthValidGeneratedPixels": raw.generated_pixels.tolist(),
+                "anchorSelected": selection.anchor_mask.astype(int).tolist(),
+                "crossViewSupportCounts": selection.support_counts.astype(int).tolist(),
+                "crossViewSelected": selection.cross_view_mask.astype(int).tolist(),
                 "depthValidMatchIndices": view.match_indices.tolist(),
                 "depthValidScenePixels": view.scene_pixels.tolist(),
                 "depthValidGeneratedPixels": view.generated_pixels.tolist(),
-                "independentInliers": independent_mask.astype(int).tolist(),
                 "jointInliers": local_mask.astype(int).tolist(),
                 "jointResiduals": local_residuals.tolist(),
+                "anchor": selection.anchor,
                 "files": view.files,
             }
         )
@@ -982,7 +1114,7 @@ def _write_result(
         "images": _file_digest(args.generated_images),
     }
     output = {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "status": validation["status"],
         "transformDirection": "generated_world_to_unity_world",
         "position": _vector_json(translation),
@@ -1010,6 +1142,7 @@ def _write_result(
             "maxDepthRelativeSpread": args.max_depth_relative_spread,
         },
         "validation": validation,
+        "anchorSelection": {name: selection.anchor for name, selection in selections.items()},
         "coordinateContract": {
             "generatedAxis": args.generated_axis,
             "unityWorld": "left_handed_y_up_z_forward",
@@ -1037,7 +1170,7 @@ def _write_result(
     if args.diagnostics_dir:
         args.diagnostics_dir.mkdir(parents=True, exist_ok=True)
         diagnostics = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "status": validation["status"],
             "runId": args.run_id,
             "candidateId": args.candidate_id,
@@ -1048,7 +1181,7 @@ def _write_result(
         }
         summary_json = args.diagnostics_dir / "multiview_summary.json"
         summary_json.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
-        _write_diagnostic_images(args.diagnostics_dir, views, independent, joint_masks, validation)
+        _write_diagnostic_images(args.diagnostics_dir, views, selections, joint_masks, validation)
         output["diagnostics"] = {
             "json": str(summary_json.resolve()),
             "image": str((args.diagnostics_dir / "multiview_summary.png").resolve()),
@@ -1057,7 +1190,13 @@ def _write_result(
     return output
 
 
-def _write_unfit_rejection(args: argparse.Namespace, views: list[ViewPoints], reason: str) -> dict[str, Any]:
+def _write_unfit_rejection(
+    args: argparse.Namespace,
+    views: list[ViewPoints],
+    selections: dict[str, ViewSelection],
+    reason: str,
+    point_consistency: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     if "RANSAC" in reason:
         reason_code = "ransac_inliers_below_minimum"
     elif "双侧深度" in reason or "depth" in reason.lower():
@@ -1068,64 +1207,6 @@ def _write_unfit_rejection(args: argparse.Namespace, views: list[ViewPoints], re
         reason_code = "fit_unavailable"
     rejection_reasons = [f"pose_unavailable:{reason_code}"]
     joint_views: dict[str, Any] = {}
-    independent_fits: dict[str, SimilarityFit] = {}
-    independent: dict[str, Any] = {}
-    cross_validation: dict[str, dict[str, Any]] = {}
-    for index, view in enumerate(views):
-        if view.depth_valid < max(3, args.min_inliers):
-            independent[view.name] = {
-                "status": "unavailable",
-                "reason": f"depth_valid={view.depth_valid}<{max(3, args.min_inliers)}",
-            }
-            continue
-        try:
-            fit = _fit_views([view], args, args.seed + 1000 + index)
-        except ValueError as exc:
-            independent[view.name] = {"status": "failed", "reason": str(exc)}
-            continue
-        independent_fits[view.name] = fit
-        independent[view.name] = {"status": "ready", **_transform_json(fit)}
-        cross_validation[view.name] = {
-            target.name: _score_transform(target, fit, args.ransac_threshold)
-            for target in views
-        }
-
-    leave_one_out: dict[str, Any] = {}
-    for index, held_out in enumerate(views):
-        training = [view for view in views if view is not held_out and view.depth_valid]
-        if not training:
-            leave_one_out[held_out.name] = {"status": "unavailable", "reason": "no_training_views"}
-            continue
-        try:
-            fit = _fit_views(training, args, args.seed + 2000 + index)
-            leave_one_out[held_out.name] = {
-                "status": "ready",
-                "trainingViews": [view.name for view in training],
-                "heldOut": _score_transform(held_out, fit, args.ransac_threshold),
-                "transform": _transform_json(fit),
-            }
-        except ValueError as exc:
-            leave_one_out[held_out.name] = {
-                "status": "failed",
-                "trainingViews": [view.name for view in training],
-                "reason": str(exc),
-            }
-
-    disagreements = []
-    names = list(independent_fits)
-    for left_index, left_name in enumerate(names):
-        for right_name in names[left_index + 1 :]:
-            left, right = independent_fits[left_name], independent_fits[right_name]
-            relative = left.rotation @ right.rotation.T
-            disagreements.append(
-                {
-                    "views": [left_name, right_name],
-                    "scaleRatio": float(max(left.scale, right.scale) / min(left.scale, right.scale)),
-                    "rotationDegrees": float(math.degrees(Rotation.from_matrix(relative).magnitude())),
-                    "translationDistance": float(np.linalg.norm(left.translation - right.translation)),
-                }
-            )
-
     joint_masks: dict[str, np.ndarray] = {}
     view_results = []
     diagnostics_views = []
@@ -1152,39 +1233,32 @@ def _write_unfit_rejection(args: argparse.Namespace, views: list[ViewPoints], re
         diagnostics_views.append(
             {
                 "name": view.name,
-                "geometricScenePixels": view.geometric_scene_pixels.tolist(),
-                "geometricGeneratedPixels": view.geometric_generated_pixels.tolist(),
+                "geometricScenePixels": selections[view.name].raw.geometric_scene_pixels.tolist(),
+                "geometricGeneratedPixels": selections[view.name].raw.geometric_generated_pixels.tolist(),
                 "depthValidMatchIndices": view.match_indices.tolist(),
                 "depthValidScenePixels": view.scene_pixels.tolist(),
                 "depthValidGeneratedPixels": view.generated_pixels.tolist(),
-                "independentInliers": (
-                    independent_fits[view.name].inliers.astype(int).tolist()
-                    if view.name in independent_fits else np.zeros(view.depth_valid, dtype=int).tolist()
-                ),
                 "jointInliers": np.zeros(view.depth_valid, dtype=int).tolist(),
                 "jointResiduals": [],
+                "anchor": selections[view.name].anchor,
                 "files": view.files,
             }
         )
     validation = {
         "status": "rejected",
         "qualityGateEnabled": not args.no_quality_gate,
+        "policy": "point_consistency_joint_fit",
         "thresholds": {
             "minViewInliers": args.min_view_inliers,
             "minViewInlierRatio": args.min_view_inlier_ratio,
-            "minCrossViewInliers": args.min_cross_view_inliers,
-            "minCrossViewRatio": args.min_cross_view_ratio,
         },
         "rejectionReasons": rejection_reasons,
         "rejectionDetails": [reason],
         "jointPerView": joint_views,
-        "independentFits": independent,
-        "crossValidation": cross_validation,
-        "leaveOneOut": leave_one_out,
-        "transformDisagreement": disagreements,
+        "pointConsistency": point_consistency or {},
     }
     output = {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "status": "rejected",
         "transformDirection": "generated_world_to_unity_world",
         "fit": None,
@@ -1217,7 +1291,7 @@ def _write_unfit_rejection(args: argparse.Namespace, views: list[ViewPoints], re
     if args.diagnostics_dir:
         args.diagnostics_dir.mkdir(parents=True, exist_ok=True)
         diagnostics = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "status": "rejected",
             "runId": args.run_id,
             "candidateId": args.candidate_id,
@@ -1228,7 +1302,7 @@ def _write_unfit_rejection(args: argparse.Namespace, views: list[ViewPoints], re
         }
         summary_json = args.diagnostics_dir / "multiview_summary.json"
         summary_json.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
-        _write_diagnostic_images(args.diagnostics_dir, views, independent_fits, joint_masks, validation)
+        _write_diagnostic_images(args.diagnostics_dir, views, selections, joint_masks, validation)
         output["diagnostics"] = {
             "json": str(summary_json.resolve()),
             "image": str((args.diagnostics_dir / "multiview_summary.png").resolve()),
@@ -1243,37 +1317,46 @@ def main() -> int:
         args.max_matches_per_view < 0
         or args.min_inliers < 3
         or args.min_view_inliers < 0
-        or args.min_cross_view_inliers < 0
         or not 0 <= args.min_view_inlier_ratio <= 1
-        or not 0 <= args.min_cross_view_ratio <= 1
         or args.spatial_grid_size < 1
         or args.max_depth_relative_spread < 0
+        or args.anchor_mask_dilation < 0
+        or args.cross_view_neighbors < 1
+        or args.cross_view_min_support < 1
+        or args.cross_view_fallback_support < 1
+        or args.min_consistent_points < 3
+        or args.min_consistent_view_points < 1
     ):
         raise SystemExit("pose 匹配、深度、视角门禁或网格参数无效")
     generated_cameras = _read_colmap_cameras(args.generated_cameras)
     generated_images = _read_colmap_images(args.generated_images)
-    views = [
+    raw_views = [
         _load_view_points(spec, generated_cameras, generated_images, args)
         for spec in args.view
     ]
     if args.primary_view_name:
-        primary = args.primary_view_name.strip().lower()
-        if not primary or primary not in {view.name.lower() for view in views}:
-            raise SystemExit(f"primary-view-name 不在输入视图中: {args.primary_view_name!r}")
-        args.primary_view_name = primary
+        print("POSE_OPTION_IGNORED --primary-view-name 已停用；只执行点级多视图一致性和一次联合拟合", flush=True)
+    anchor_views, selections = _select_anchor_points(raw_views, args)
+    views, point_consistency = _select_cross_view_points(anchor_views, selections, args)
     if not any(view.depth_valid for view in views):
         reason = "所有视角都没有可用的双侧深度对应点"
-        _write_unfit_rejection(args, views, reason)
+        _write_unfit_rejection(args, views, selections, reason, point_consistency)
+        print("POSE_ESTIMATE_REJECTED", reason, args.output, flush=True)
+        return 0 if args.exit_zero_on_rejected else 2
+    if point_consistency.get("status") == "insufficient" and not args.no_quality_gate:
+        reason = "跨视图一致点不足"
+        _write_unfit_rejection(args, views, selections, reason, point_consistency)
         print("POSE_ESTIMATE_REJECTED", reason, args.output, flush=True)
         return 0 if args.exit_zero_on_rejected else 2
     try:
         joint = _fit_views(views, args, args.seed)
     except ValueError as exc:
-        _write_unfit_rejection(args, views, str(exc))
+        _write_unfit_rejection(args, views, selections, str(exc), point_consistency)
         print("POSE_ESTIMATE_REJECTED", str(exc), args.output, flush=True)
         return 0 if args.exit_zero_on_rejected else 2
-    validation, independent, joint_masks = _build_validation(args, views, joint)
-    output = _write_result(args, views, joint, validation, independent, joint_masks)
+    validation, joint_masks = _build_validation(args, views, joint)
+    validation["pointConsistency"] = point_consistency
+    output = _write_result(args, views, joint, validation, selections, joint_masks)
     if output["status"] == "ready":
         print("POSE_ESTIMATE_READY", int(joint.inliers.sum()), f"scale={joint.scale:.9g}", args.output, flush=True)
         return 0

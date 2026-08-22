@@ -58,6 +58,27 @@ def main() -> int:
         assert command[command.index("--pose-primary-view-name") + 1] == "left"
         mask_values = [command[index + 1] for index, value in enumerate(command) if value == "--trellis-mask-prompt"]
         assert mask_values == ["blue chair", "wooden table"]
+        provider_task = dict(task)
+        provider_task.update(
+            {
+                "model_provider": "hunyuan",
+                "model_profile": "shape",
+                "provider_options": {"shape_subfolder": "hunyuan3d-dit-v2-0"},
+                "hunyuan_texture": True,
+            }
+        )
+        provider_command, _ = batch.build_command(
+            provider_task,
+            {},
+            Path("/runs/provider"),
+            Path("/bin/echo"),
+            Path("/bin/true"),
+        )
+        assert provider_command[provider_command.index("--model-provider") + 1] == "hunyuan"
+        assert provider_command[provider_command.index("--model-profile") + 1] == "shape"
+        provider_options = json.loads(provider_command[provider_command.index("--provider-options-json") + 1])
+        assert provider_options == {"shape_subfolder": "hunyuan3d-dit-v2-0"}
+        assert "--hunyuan-texture" in provider_command
         migrated_task = batch.enrich_from_unity_manifest(
             {
                 "task_id": "Task_001",

@@ -28,7 +28,7 @@ CORE_KEYS = {
     "task_id", "input_image", "run_root", "output_dir", "pipeline_args", "prompts",
     "task_manifest", "unity_manifest",
     "input_image_manifest",
-    "prompt", "task_prompt", "object_prompt",
+    "prompt", "task_prompt", "object_prompt", "provider_options",
 }
 LIST_FLAGS = {
     "scene_images": "--scene-image",
@@ -221,6 +221,10 @@ def enrich_from_unity_manifest(task: dict[str, Any]) -> dict[str, Any]:
         if legacy_name in task:
             manifest_prompts[canonical] = task[legacy_name]
     result["prompts"] = manifest_prompts
+    if "trellis_mask_prompts" not in result and value.get("trellisMaskPrompts"):
+        result["trellis_mask_prompts"] = value["trellisMaskPrompts"]
+    if "anchor_mask_prompt" not in result and value.get("anchorMaskPrompt"):
+        result["anchor_mask_prompt"] = value["anchorMaskPrompt"]
     if "task_id" not in task and value.get("taskId"):
         result["task_id"] = value["taskId"]
     return result
@@ -231,7 +235,14 @@ def option_flag(key: str) -> str:
 
 
 def append_option(command: list[str], key: str, value: Any) -> None:
-    if value is None or key in CORE_KEYS or key == "prompts":
+    if value is None:
+        return
+    if key == "provider_options":
+        if not isinstance(value, dict):
+            raise ValueError("provider_options 必须是对象")
+        command.extend(["--provider-options-json", json.dumps(value, ensure_ascii=False, separators=(",", ":"))])
+        return
+    if key in CORE_KEYS or key == "prompts":
         return
     if key in LIST_FLAGS:
         flag = LIST_FLAGS[key]
@@ -297,12 +308,16 @@ def build_command(
     # ``options`` for less common pipeline flags.
     for key in (
         "input_ply", "scene_images", "scene_depths", "scene_cameras", "scene_masks", "generated_masks", "gim_pairs",
-        "trellis_input", "trellis_mask_prompts", "seg_engine", "render_resolution", "render_mode", "render_fov", "render_distance",
+        "trellis_input", "trellis_mask_prompts", "anchor_mask_prompt", "seg_engine", "render_resolution", "render_mode", "render_fov", "render_distance",
         "render_side_angle_degrees", "render_yaw_degrees", "render_pitch_degrees",
-        "run_sags", "skip_gim", "skip_pose", "coarse_pose_view_names", "pose_view_names", "pose_primary_view_name",
+        "run_sags", "skip_gim", "skip_pose", "coarse_pose_view_names", "pose_view_names",
         "disable_camera_refinement", "gim_anchor_roi_radius", "gim_aligned_max_displacement",
-        "sags_points_json", "sags_mask", "sags_view_name", "sags_points_per_mask", "sags_force_seed_radius", "sags_no_force_seed",
-        "sags_mask_id", "sags_threshold", "sags_min_votes", "sags_visibility_depth_tolerance", "sags_gd_interval",
+        "sags_points_json", "sags_mask", "sags_view_name", "sags_view_mode", "sags_yaw_offsets", "sags_view_names", "sags_points_per_mask", "sags_force_seed_radius", "sags_no_force_seed",
+        "sags_mask_id", "sags_threshold", "sags_min_votes", "sags_independent_min_prior_coverage", "sags_visibility_depth_tolerance", "sags_gd_interval",
+        "model_provider", "model_profile", "provider_options", "model_input_mask", "model_mask_prompt",
+        "model_dir", "model_config_path", "hunyuan_python", "hunyuan_model_path", "hunyuan_shape_subfolder",
+        "hunyuan_texture", "mesh_to_gaussian_density", "mesh_to_gaussian_thickness", "mesh_to_gaussian_max_points",
+        "sparse_steps", "slat_steps", "sparse_cfg", "slat_cfg",
     ):
         if key in task:
             merged[key] = task[key]
@@ -344,6 +359,47 @@ def read_pipeline_status(path: Path) -> str | None:
     except (OSError, json.JSONDecodeError):
         return None
     return value.get("status") if isinstance(value, dict) else None
+
+
+def read_pipeline_details(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    stages = value.get("stages", {})
+    if not isinstance(stages, dict):
+        stages = {}
+    failed = [(name, item) for name, item in stages.items()
+              if isinstance(item, dict) and item.get("status") in {"failed", "rejected", "blocked"}]
+    stage_name, stage_value = failed[0] if failed else (None, {})
+    if stage_name is None and stages:
+        # A running manifest is useful when the worker is interrupted before
+        # it can write a terminal record.  The bridge uses this to show the
+        # last known server stage while the task is still recoverable.
+        pending = [
+            (name, item) for name, item in stages.items()
+            if isinstance(item, dict) and item.get("status") in {"running", "blocked"}
+        ]
+        if pending:
+            stage_name, stage_value = pending[-1]
+    failure_error = stage_value.get("error") if isinstance(stage_value, dict) else None
+    if not failure_error:
+        failure_error = value.get("fatal_error")
+    failure_log = stage_value.get("log") if isinstance(stage_value, dict) else None
+    return {
+        "pipeline_manifest": str(path.resolve()),
+        "pipeline_status": value.get("status"),
+        "failed_stages": value.get("failed_stages", []),
+        "rejected_stages": value.get("rejected_stages", []),
+        "failure_stage": stage_name,
+        "failure_stage_status": stage_value.get("status") if isinstance(stage_value, dict) else None,
+        "failure_error": failure_error,
+        "failure_log": failure_log,
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -453,9 +509,10 @@ def run_one(
         return_code = process.wait()
 
     pipeline_status = read_pipeline_status(manifest_path)
+    pipeline_details = read_pipeline_details(manifest_path)
     if pipeline_status == "rejected":
         task_status = "rejected"
-    elif return_code == 0 and pipeline_status != "failed":
+    elif return_code == 0 and pipeline_status not in {"failed", "blocked"}:
         task_status = "ready"
     else:
         task_status = "failed"
@@ -463,6 +520,7 @@ def run_one(
         {
             "return_code": return_code,
             "pipeline_status": pipeline_status,
+            **pipeline_details,
             "status": task_status,
             "duration_seconds": round(time.time() - started, 3),
             "finished_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -496,7 +554,28 @@ def main() -> int:
             record = run_one(enrich_from_unity_manifest(task), defaults, run_root, args)
         except Exception as exc:
             task_id = str(task.get("task_id", "<unknown>"))
-            record = {"task_id": task_id, "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            error = f"{type(exc).__name__}: {exc}"
+            record = {"task_id": task_id, "status": "failed", "error": error,
+                      "pipeline_status": "failed", "failure_stage": "batch",
+                      "failure_stage_status": "failed", "failure_error": error}
+            # Do not let a malformed task id turn error handling into a path
+            # traversal.  Valid task ids have already passed validate_task_id
+            # in run_one; this branch also handles failures before that call.
+            safe_task = task_id and Path(task_id).name == task_id and task_id not in {".", ".."} \
+                and "/" not in task_id and "\\" not in task_id
+            if safe_task:
+                write_json(
+                    run_root / task_id / "manifest.json",
+                    {
+                        "schemaVersion": 2,
+                        "status": "failed",
+                        "provider": task.get("model_provider", defaults.get("model_provider", "trellis")),
+                        "failed_stages": ["batch"],
+                        "fatal_error": error,
+                        "stages": {"batch": {"status": "failed", "error": error}},
+                        "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
             print(f"[batch:{task_id}] ERROR: {record['error']}", file=sys.stderr, flush=True)
         records.append(record)
         failed = failed or record.get("status") == "failed"

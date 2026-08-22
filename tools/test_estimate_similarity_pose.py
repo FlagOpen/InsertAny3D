@@ -108,6 +108,10 @@ def main() -> int:
             "1000",
             "--min-inliers",
             "8",
+            "--min-consistent-points",
+            "8",
+            "--min-consistent-view-points",
+            "3",
             "--seed",
             "7",
         ]
@@ -161,14 +165,11 @@ def main() -> int:
         subprocess.run(primary_command, check=True, text=True, capture_output=True)
         primary_result = json.loads((root / "pose_primary.json").read_text(encoding="utf-8"))
         primary_validation = primary_result["validation"]
-        if (
-            primary_result["status"] != "ready"
-            or primary_validation.get("policy") != "primary_with_corroboration"
-            or primary_validation.get("primaryView") != "left"
-            or "right" not in primary_validation.get("corroboratingViews", [])
-        ):
+        if primary_result["status"] != "ready" or primary_validation.get("policy") != "point_consistency_joint_fit":
             raise AssertionError(primary_validation)
-        print("POSE_PRIMARY_CORROBORATION_OK", primary_validation["corroboratingViews"])
+        if any(key in primary_validation for key in ("independentFits", "crossValidation", "leaveOneOut")):
+            raise AssertionError("independent transform diagnostics must not be produced")
+        print("POSE_DEPRECATED_PRIMARY_IGNORED_OK")
 
         # Both views remain individually solvable, but the right view now
         # describes a different translation.  A concatenation-only RANSAC
@@ -248,6 +249,7 @@ def main() -> int:
             "--skip-segmentation",
             "--skip-render",
             "--skip-gim",
+            "--skip-anchor-masking",
             "--render-mode",
             "anchor",
             "--pose-view-names",
@@ -258,6 +260,10 @@ def main() -> int:
             "0.005",
             "--pose-min-inliers",
             "8",
+            "--pose-min-consistent-points",
+            "8",
+            "--pose-min-consistent-view-points",
+            "3",
             "--trellis-python",
             sys.executable,
             "--gim-python",

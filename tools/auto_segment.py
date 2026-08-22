@@ -42,6 +42,17 @@ _CN_ALIASES = {
     "桌子": "table",
     "植物": "plant",
     "树": "tree",
+    "粉色的猪": "pig",
+    "小猪": "pig",
+    "猪": "pig",
+    "南瓜": "pumpkin",
+    "拖拉机": "tractor",
+    "农用车": "tractor",
+    "引擎盖": "tractor",
+    "汽车": "car",
+    "车辆": "vehicle",
+    "牛": "cow",
+    "奶牛": "cow",
 }
 
 
