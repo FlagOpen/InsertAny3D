@@ -1,191 +1,224 @@
 # InsertAny3D
-代码仓库正在完善中
 
-## DDLs:
+InsertAny3D 是一个“Unity 场景 + 生成模型 + 多视角几何对齐”的物体插入流水线。
+它接收 Unity 场景的多视角渲染结果和一张图片编辑结果，在服务器上生成可导入
+Unity 的 Gaussian Splatting 物体，并估计该物体在 Unity 世界坐标中的位置、旋转和缩放。
 
-#### 2025/08/07
-- 创建仓库，确定仓库框架和大致日程
+仓库保存的是可复现的主项目代码、环境配置、第三方源码版本记录和必要补丁；模型权重、
+Python 虚拟环境、Unity 工程、场景数据和运行结果不放入 Git。
 
-#### 2025/08/09
-- 完成Unity脚本
-- 完成通信模块
-  1. 实现任意自由渲染接口
-  2. 实现物体位姿控制
+## 工作方式
 
-#### 2025/08/14
-- 实现服务器反向连接
-* 说明：
-  1. 服务器运行python tools/ipc_server.py
-  2. 端口转发12345到本地
-  3. Unity连接本地转发端口
-  4. 服务器运行python ipc_api_demo.py
+一次完整任务由 Unity 和服务器两部分协作完成：
 
-
-#### 2025/08/13
-- 建立主src
-  1. 确认主src的文件目录格式
-  2. 需要包含submodules和各个submodules的调用方式
-
-#### 2025/08/15
-- 调试Generate and Insert
-- 将Unity包装成一个下载即可使用的工程
-
-#### 2025/08/18
-- 建立Agent模块和通信模块
-  1. 实现自动Tasks
-  2. 实现自动CLIP Prompts
-  3. 实现自动CLIP选图
-- 建立CLIP选图的采样策略
-  1. 完全随机模式
-  2. LookAt模式
-    1. 对LookAt Object的位置的搜索（3D: xyz）
-    2. 对视角的搜索（3D: E,A,D）
-
-#### 2025/08/20
-- 测试选图采样策略
-
-
-## 代码目录结构
-```txt
-InsertAny3D
-- Unity Proj # 创建新的Unity时直接复制该目录即可
-- src
-  - agent
-    - view_select_tools
-    - docs
-    - api_key.conf
-  - assets
-    - date
-      - name
-        - source
-          - images
-          - sparse
-        - output
-          - point_cloud
-          - object_{obj_name}
-        - unity
-        - gim
-  - submodules
-    - TRELLIS
-      - 3DGS Renderer
-    - GIM
-    - SAGS
-    - LangSAM
-  - server_tools
-  - main.py
+```text
+Unity 场景
+  ├─ 渲染原场景 left / center / right（RGB、深度、相机参数）
+  ├─ 保存任务 manifest 和提示词
+  └─ 接收服务器返回的 inserted_object.ply 与 pose.json
+              │
+              ▼
+服务器 InsertAny3D
+  ├─ 图片编辑结果检查或生成
+  ├─ 3D provider 生成组合物体
+  ├─ Gaussian 渲染、GIM 匹配和多视角 pose 估计
+  ├─ SAGS 从组合物体中提取新物体
+  └─ 输出 PLY、pose、manifest 和诊断结果
+              │
+              ▼
+Unity 导入新物体，应用 pose，渲染 original / inserted 评估视图
 ```
 
+Unity 负责场景、相机、任务管理、图片和深度渲染，以及最终 Gaussian 资产导入和
+位姿应用。本仓库只提供服务器端代码和文件协议，不包含 Unity 脚本源码、Unity
+编辑器安装方式或 Unity 工程本身。Unity 侧只需要按本文约定提供输入，并消费服务器输出。
 
-## 代码逻辑结构：
-### 1. Generate and Insert:
+## Unity 与服务器流程
 
-#### 输入：
-> 1. 正面视角位姿$V1$，渲染深度图$D_{V1}$，渲染rgb图$I_{V1}$；
-> 2. 侧面视角位姿$V2$，渲染深度图$D_{V2}$，渲染rgb图$I_{V2}$；
-> 3. 正面视角渲染rgb图的编辑后结果$I_{V1}'$
-> 位姿保存格式类似cameras.txt文件，深度图为raw格式，rgb图为png格式
+### 1. Unity 准备任务
 
-#### 操作：
-> 1. 对$I_{V1}'$进行分割，获取主物体+Anchor的组合物体分割结果$I''_{V1}$
->    - 这一步可能会使用GPT-4o or RemBG进行，之前是直接拉框or打点
-> 2. TRELLIS：$I''_{V1}$ -> 3D Asset $A_c$
-> 3. 对$A_c$进行环绕渲染，获取3DGS格式的source文件夹{images, sparse}
-> 4. 从images中选取最接近$I_{V1}$和$I_{V2}$的图片$R_{V1}$和$R_{V2}$
-> 5. 使用Multiview Depth Matching，获取位姿矩阵$S$,$V$,$T$
-> 5. 用SAGS进行物体分割，获取前景3D Asset $A_s$
+在 Unity 场景中为每个插入位置建立稳定的任务 ID，例如 `Task_001`。任务应记录：
 
-#### 输出：
-> 1. 插入物体$A_s$
-> 2. 插入位姿$S$,$V$,$T$
+- 插入参考点和用于渲染的相机参数；
+- 原场景的 `left`、`center`、`right` 三视图；
+- 每张图对应的 float32 深度和相机参数；
+- 任务描述、编辑提示词和锚点提示词。
 
-#### Submodules:
-1. (18G VRAM) TRELLIS
-2. ( 4G VRAM) 3DGS Renderer
-3. (20G VRAM) GIM
-4. (20G VRAM) SAGS+LangSAM
+Unity 将这些内容写入一个任务目录。服务端最少需要：
 
-### 2. InsertAny3D
+```text
+<task>/
+├── step1/
+│   ├── left/image.png       image.raw       image.camera.json
+│   ├── center/image.png     image.raw       image.camera.json
+│   └── right/image.png      image.raw       image.camera.json
+└── task_manifest.json
+```
 
-包含Unity脚本、Agent模块、通信模块、图片编辑模块
-#### 1. Unity C#脚本
-给定位姿渲染图片，并将渲染图片保存为指定格式：
+如果已经在 Unity 或其他图片编辑工具中得到编辑后的中心图，还应放在：
 
-    1. 单图，渲染rgb、深度图，并保存单个位姿文件
-    2. 多图序列，3dgs格式，即source{images, sparse}，方便重建为3DGS场景
-    3. 相机序列，存储为视频输出
-    4. 给定$A_s$、$S$,$V$,$T$，将指定物体插入到指定位姿
-#### 2. Agent模块
-    1. gpt-4o：查看场景，生成tasks，clip prompt，edit prompt
-    2. clip & gpt-4o：从Unity中获取图片，选出$V1$、$V2$
-    3. 调用图片编辑模块编辑，并选取最佳编辑$I_{V1}'$
-    4. 任务要求文档
-#### 3. 通信模块
-    1. 调用Generate and Insert
-    2. Python IPC：获取Agent要求，传递给Unity
-    3. Unity IPC：获取渲染需求，渲染出文件保存到指定路径
-    4. Python loader：读取渲染文件
-#### 4. 图片编辑模块
-    1. gpt-4o-image
-    2. FLUX-kontext
-    3. Fooocus
-    4. ...
+```text
+<task>/edited/center.png
+```
+
+三组 `image.png`、`image.raw`、`image.camera.json` 必须保持同一视角和同一顺序。
+深度和相机数据是 pose 估计的输入，不能只上传 RGB。
+
+### 2. 服务器处理任务
+
+服务器入口是：
+
+```bash
+third_party/TRELLIS/.venv/bin/python tools/run_insert_pipeline.py \
+  --run-root <run-root> \
+  --task-id Task_001 \
+  --input-image <task>/edited/center.png \
+  --task-prompt '在场景中插入一个红色邮箱' \
+  --scene-image <task>/step1/left/image.png \
+  --scene-image <task>/step1/center/image.png \
+  --scene-image <task>/step1/right/image.png \
+  --scene-depth <task>/step1/left/image.raw \
+  --scene-depth <task>/step1/center/image.raw \
+  --scene-depth <task>/step1/right/image.raw \
+  --scene-camera <task>/step1/left/image.camera.json \
+  --scene-camera <task>/step1/center/image.camera.json \
+  --scene-camera <task>/step1/right/image.camera.json \
+  --run-sags
+```
+
+批量任务使用 `tools/run_insert_batch.py`，每个任务拥有独立目录和日志：
+
+```bash
+third_party/TRELLIS/.venv/bin/python tools/run_insert_batch.py \
+  --jobs <scene>/insert_jobs.json \
+  --skip-ready
+```
+
+服务端阶段如下：
+
+1. **输入和提示词**：读取 Unity manifest、编辑图和任务参数。
+2. **3D provider**：默认使用 TRELLIS；也支持 SAM3D Objects 和 Hunyuan3D。
+3. **Gaussian 渲染**：生成统一的 RGB、深度、COLMAP 相机和 Gaussian 模型目录。
+4. **GIM 匹配**：将生成视图与 Unity 原场景视图匹配。
+5. **Pose 估计**：深度反投影后计算 generated world 到 Unity world 的相似变换。
+6. **SAGS 提取**：从“锚点 + 新物体”的组合 Gaussian 中提取新物体。
+7. **证据记录**：每个阶段写入 manifest、日志和诊断文件。
+
+### 3. Unity 回收结果
+
+服务器任务目录的关键输出是：
+
+```text
+<run-root>/<task-id>/
+├── 05_pose/pose.json
+└── 06_sags/inserted_object.ply
+```
+
+Unity 只应导入 `06_sags/inserted_object.ply`。`02_trellis/sample.ply` 仍包含锚点，
+直接导入会造成原场景物体重复。
+
+Unity 导入 PLY 后，将 `05_pose/pose.json` 中的 position、xyzw rotation 和统一 scale
+应用到生成物，再渲染原场景和插入后场景进行目视检查或基准评测。
+
+## 服务器输出目录
+
+```text
+<run-root>/<task-id>/
+├── 01_segmentation/          初始 mask、points 和分割诊断
+├── 02_trellis/               provider 输入、sample.ply、生成 manifest
+├── 03_rendered_3dgs/         RGB、深度、相机和 Gaussian model
+├── 03_sags_views/             SAGS 使用的多视角输入（启用 ring6 时）
+├── 04_gim/                   匹配图、matches.json 和几何诊断
+├── 05_pose/pose.json          Unity 世界坐标位姿
+├── 06_sags/inserted_object.ply 最终回传 Unity 的新物体
+├── logs/                     阶段日志
+└── manifest.json             参数、权重和阶段状态
+```
+
+失败任务也会保留 manifest 和日志，便于定位失败阶段。不要让多个任务共用同一个
+`--output-dir`；批处理优先使用 `--run-root` 与 `--task-id`。
+
+## 支持的 provider
+
+| provider | 输出 | 运行环境 | 说明 |
+| --- | --- | --- | --- |
+| `trellis` | Gaussian PLY | `third_party/TRELLIS/.venv` | 默认路线，先生成组合物体再由 SAGS 提取 |
+| `sam3d` | Gaussian PLY | `third_party/TRELLIS/.venv` | 需要单物体输入 mask |
+| `hunyuan` | mesh，再转换为 Gaussian PLY | `third_party/Hunyuan3D-2/.venv` | 使用独立 CUDA/PyTorch 环境 |
+
+provider、版本、权重 revision、坐标契约和转换信息都会写入任务 manifest。未知
+provider 会在 preflight 阶段失败，不会静默回退到 TRELLIS。
+
+## 安装和验证
+
+从 GitHub 获取源码：
+
+```bash
+git clone https://github.com/Junnan-bjtu/InsertAny3D.git
+cd InsertAny3D
+```
+
+只运行而不需要 Git 时，也可以使用 ModelScope 快照：
+
+```bash
+modelscope download --model KHUU0424/InsertAny3D_v1
+```
+
+完整安装顺序见 [`install.md`](install.md)：
+
+```bash
+bash tools/bootstrap_third_party.sh
+bash tools/install_environments.sh all
+bash tools/download_models.sh
+CUDA_VISIBLE_DEVICES=0 bash tools/verify_environments.sh
+```
+
+成功标志为：
+
+```text
+INSERTANY3D_THREE_ENVIRONMENTS_READY
+```
+
+不需要模型推理的基础自测：
+
+```bash
+third_party/TRELLIS/.venv/bin/python tools/test_estimate_similarity_pose.py
+third_party/TRELLIS/.venv/bin/python tools/test_insert_batch.py
+PYTHONPATH=tools third_party/TRELLIS/.venv/bin/python tools/model_center/tests/test_model_center.py
+```
+
+第三方源码不会直接提交到主仓库。固定上游 commit、补丁和新增文件的重建方式见
+[`code/third_party/THIRD_PARTY_REPOS.md`](code/third_party/THIRD_PARTY_REPOS.md)。
+HPSv2 等外部指标仓库的处理方式见 [`metrics/HPSV2_SOURCE.md`](metrics/HPSV2_SOURCE.md)。
+
+## 常用服务器工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `tools/run_insert_pipeline.py` | 单任务完整编排 |
+| `tools/run_insert_batch.py` | 从 jobs JSON 串行运行任务 |
+| `tools/auto_segment.py` | 生成分割 mask 和 SAGS points |
+| `tools/segment_anchor_views.py` | 生成多视角锚点 mask |
+| `tools/render_trellis_views.py` | 按 yaw/pitch 生成定向视图 |
+| `tools/run_gim_match.py` | 两张图片的 GIM 匹配 |
+| `tools/estimate_similarity_pose.py` | 多视角相似变换估计 |
+| `tools/run_sags_text.py` | 无 UI 执行 SAGS 分割 |
+| `metrics/run_metric.py` | 指标统一入口，目前支持 HPSv2 |
+
+详细文件协议和阶段参数见 [`codex_ops/WORKFLOW.md`](codex_ops/WORKFLOW.md)，
+Unity 侧完整任务说明见 [`codex_ops/UNITY_INSERT_WORKFLOW_TUTORIAL_ZH.md`](codex_ops/UNITY_INSERT_WORKFLOW_TUTORIAL_ZH.md)。
+
+## 复现边界
+
+- Unity 工程和 Unity 脚本不在本仓库中，需要由调用方提供。
+- 模型权重和缓存由安装脚本下载，不进入 Git。
+- 第三方源码由固定 commit、patch 和 overlay 重建。
+- 输入图片、深度、相机文件和运行结果属于任务数据，不进入 Git。
+- 完整端到端结果仍受 GPU、CUDA、上游模型服务和输入数据质量影响。
 
 ## 致谢
 
-感谢以下优秀开源项目：[TRELLIS](https://github.com/microsoft/TRELLIS)、[Fooocus](https://github.com/lllyasviel/Fooocus)、[SAGS](https://github.com/XuHu0529/SAGS)、[UnityGaussianSplatting](https://github.com/aras-p/UnityGaussianSplatting) 和 [GIM](https://github.com/xuelunshen/gim)。
-
-## 实验运行环境
-
-本仓库中的实验在以下服务器环境中运行：
-
-- 操作系统：Ubuntu 20.04.6 LTS（Focal Fossa），x86_64 架构
-- Linux 内核：5.15.0-139-generic
-- 显卡：8 张 NVIDIA GeForce RTX 3090
-- NVIDIA 驱动版本：550.163.01
-- 系统 CUDA 工具包：12.4
-- NVCC 版本：V12.4.131
-
-项目统一使用三套运行环境，不再为每个第三方仓库分别创建环境：
-
-- 主环境：`third_party/TRELLIS/.venv`，供 TRELLIS、TRELLIS-old、SAGS、
-  LangSAM 和 3DGS 渲染代码共同使用；
-- Hunyuan 环境：`third_party/Hunyuan3D-2/.venv`；
-- GIM 环境：`third_party/gim/.venv`。
-
-`third_party/SAGS/.venv` 和 `third_party/TRELLIS-old/.venv` 只是指向主环境的
-符号链接。MVInpainter 是对比实验模型，不属于 InsertAny3D 主流程，也不创建
-主流程运行环境。
-
-环境、权重和运行结果不会上传到模型仓库。从新 clone 开始的完整安装方法见
-[`install.md`](install.md)，三套环境的详细说明见
-[`环境安装说明.md`](环境安装说明.md)。可以使用
-`tools/install_environments.sh` 分别安装三套环境，再使用
-`tools/verify_environments.sh` 验证环境和 CUDA 扩展。历史环境的完整软件包
-版本仍保存在 `code/environment` 和各第三方仓库的
-`ENVIRONMENT_VERSIONS.txt` 中，供排查版本差异时参考。
-
-## 第一阶段可运行入口
-
-项目已经提供三个非交互命令：
-
-- `tools/segment_image.py`：使用 GroundingDINO 和 SAM 生成文本提示对应的前景掩码；
-- `third_party/gim/demo.py`：执行 GIM 图片匹配并输出匹配图和校正图；
-- `tools/render_trellis_3dgs.py`：将 TRELLIS Gaussian PLY 渲染为 RGB、深度、COLMAP 相机文件和 3DGS 模型目录。
-
-具体命令、目录结构和服务器 2 验收记录见
-[`第一阶段运行说明.md`](第一阶段运行说明.md)。
-
-### MVInpainter 数据说明
-
-`third_party/MVInpainter/data` 中的 `mvimagenet` 和 `masks` 原本包含数百万个
-小文件，超过模型仓库单次上传的文件数量限制。因此发布时将它们完整打包为：
-
-- `third_party/MVInpainter/data/mvimagenet.tar`
-- `third_party/MVInpainter/data/masks.tar`
-
-下载后进入 `third_party/MVInpainter/data` 目录，执行以下命令即可恢复原目录：
-
-```bash
-tar -xf mvimagenet.tar
-tar -xf masks.tar
-```
+本项目使用或参考了 [TRELLIS](https://github.com/microsoft/TRELLIS)、
+[GIM](https://github.com/xuelunshen/gim)、
+[SAGS](https://github.com/XuHu0529/SAGS)、
+[Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2) 和相关开源项目。
