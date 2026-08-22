@@ -50,6 +50,12 @@ codex_ops/*.ok
 /data/*
 !/data/README.md
 
+# Local metric checkout and one-off render products
+/metrics/HPSv2/
+/model/
+/source/
+/views.json
+
 # Archives are normally downloaded data. Keep the reproducibility archives
 # under code/third_party/overlays tracked explicitly.
 *.zip
