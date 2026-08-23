@@ -49,6 +49,6 @@ clone_and_prepare MVInpainter \
   https://github.com/ewrfcas/MVInpainter.git \
   323d7f6ce3f73b0f263eb7f07dc48aefa6f27f34
 
-git -C "$PROJECT_ROOT" submodule update --init third_party/SAGS third_party/gim third_party/TRELLIS third_party/Hunyuan3D-2
+git -C "$PROJECT_ROOT" submodule update --init third_party/SAGS third_party/gim third_party/TRELLIS third_party/Hunyuan3D-2 third_party/MVInpainter
 ln -sfn ../TRELLIS/.venv "$THIRD_PARTY/SAGS/.venv"
 echo "InsertAny3D third-party sources are ready"

@@ -13,9 +13,9 @@ SAGS 工作树应保持干净；其余尚未迁移的 `third_party/*` 在 bootst
 - 分支：insertany3d
 
 ## MVInpainter
-- 仓库：https://github.com/ewrfcas/MVInpainter.git
-- 提交：323d7f6ce3f73b0f263eb7f07dc48aefa6f27f34
-- 分支：main
+- 仓库：git@github.com:Junnan-bjtu/MVInpainter.git
+- 提交：a4bea2cbea152cdeb3741f00846a0369e435289b
+- 分支：insertany3d
 
 ## SAGS
 - 仓库：https://github.com/Junnan-bjtu/SAGS.git
