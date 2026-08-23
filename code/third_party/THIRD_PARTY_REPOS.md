@@ -8,9 +8,9 @@ SAGS 工作树应保持干净；其余尚未迁移的 `third_party/*` 在 bootst
 若上游或 fork 地址不可访问，对应第三方源码将无法仅凭根仓库重建。
 
 ## Hunyuan3D-2
-- 仓库：https://github.com/Tencent-Hunyuan/Hunyuan3D-2.git
-- 提交：b173994017b1ab9559792fbdfa6194952e2ae2e0
-- 分支：main
+- 仓库：git@github.com:Junnan-bjtu/Hunyuan3D-2.git
+- 提交：6842c7036f4e54594096a25177302d662d034148
+- 分支：insertany3d
 
 ## MVInpainter
 - 仓库：https://github.com/ewrfcas/MVInpainter.git

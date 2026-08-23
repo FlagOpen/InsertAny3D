@@ -55,7 +55,7 @@ clone_and_prepare TRELLIS-old \
   https://github.com/microsoft/TRELLIS.git \
   eb83038919f6e1feb63accf3a97a377a608c497d
 
-git -C "$PROJECT_ROOT" submodule update --init third_party/SAGS third_party/gim third_party/TRELLIS
+git -C "$PROJECT_ROOT" submodule update --init third_party/SAGS third_party/gim third_party/TRELLIS third_party/Hunyuan3D-2
 ln -sfn ../TRELLIS/.venv "$THIRD_PARTY/SAGS/.venv"
 ln -sfn ../TRELLIS/.venv "$THIRD_PARTY/TRELLIS-old/.venv"
 echo "InsertAny3D third-party sources are ready"

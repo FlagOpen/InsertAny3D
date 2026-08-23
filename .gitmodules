@@ -10,3 +10,7 @@
 	path = third_party/TRELLIS
 	url = git@github.com:Junnan-bjtu/TRELLIS.git
 	branch = insertany3d
+[submodule "third_party/Hunyuan3D-2"]
+	path = third_party/Hunyuan3D-2
+	url = git@github.com:Junnan-bjtu/Hunyuan3D-2.git
+	branch = insertany3d
