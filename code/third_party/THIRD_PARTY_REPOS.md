@@ -18,7 +18,7 @@ SAGS 工作树应保持干净；其余尚未迁移的 `third_party/*` 在 bootst
 - 分支：insertany3d
 
 ## SAGS
-- 仓库：https://github.com/Junnan-bjtu/SAGS.git
+- 仓库：git@github.com:Junnan-bjtu/SAGS.git
 - 提交：cb905c26178b9ff1cf2de51cf0051d509192f159
 - 分支：insertany3d
 
