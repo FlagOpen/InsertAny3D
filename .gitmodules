@@ -1,0 +1,4 @@
+[submodule "third_party/SAGS"]
+	path = third_party/SAGS
+	url = https://github.com/Junnan-bjtu/SAGS.git
+	branch = insertany3d

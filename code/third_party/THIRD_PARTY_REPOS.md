@@ -1,12 +1,11 @@
 # 第三方仓库版本记录
 
-根仓库不直接保存这六个第三方工作树。`tools/bootstrap_third_party.sh`
-会克隆下面的固定提交，再应用 `patches/` 中的已跟踪源码差异和
-`overlays/` 中新增的源码、配置文件。权重、虚拟环境、缓存、输入数据和
-运行结果不在补丁或 overlay 中。
+SAGS 已迁移为 Git submodule，由根仓库固定提交版本。其余第三方工作树暂由
+`tools/bootstrap_third_party.sh` 克隆固定提交，再应用 `patches/` 中的已跟踪源码差异和
+`overlays/` 中新增的源码、配置文件。权重、虚拟环境、缓存、输入数据和运行结果不进入 Git。
 
-因此 `third_party/*` 在安装完成后出现本地修改是预期状态，不代表版本漂移。
-若上游地址不可访问，则无法仅凭根仓库重建第三方源码。
+SAGS 工作树应保持干净；其余尚未迁移的 `third_party/*` 在 bootstrap 后出现预期补丁差异不代表版本漂移。
+若上游或 fork 地址不可访问，对应第三方源码将无法仅凭根仓库重建。
 
 ## Hunyuan3D-2
 - 仓库：https://github.com/Tencent-Hunyuan/Hunyuan3D-2.git
@@ -19,9 +18,9 @@
 - 分支：main
 
 ## SAGS
-- 仓库：https://github.com/MrHandsomeljn/SAGS.git
-- 提交：4c020b3290072a26b2b8ce9b023b7e553741b884
-- 分支：Gradio-by-MrHandsomeljn
+- 仓库：https://github.com/Junnan-bjtu/SAGS.git
+- 提交：cb905c26178b9ff1cf2de51cf0051d509192f159
+- 分支：insertany3d
 
 ## TRELLIS
 - 仓库：https://github.com/MrHandsomeljn/TRELLIS

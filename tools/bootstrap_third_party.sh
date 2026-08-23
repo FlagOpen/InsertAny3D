@@ -48,9 +48,6 @@ clone_and_prepare Hunyuan3D-2 \
 clone_and_prepare MVInpainter \
   https://github.com/ewrfcas/MVInpainter.git \
   323d7f6ce3f73b0f263eb7f07dc48aefa6f27f34
-clone_and_prepare SAGS \
-  https://github.com/MrHandsomeljn/SAGS.git \
-  4c020b3290072a26b2b8ce9b023b7e553741b884
 clone_and_prepare TRELLIS \
   https://github.com/MrHandsomeljn/TRELLIS \
   1c4ab02e359f991d949cc527b81f065f2f266b92
@@ -61,6 +58,7 @@ clone_and_prepare gim \
   https://github.com/xuelunshen/gim.git \
   89e9cddbf1f013f50587a0198b0382b657cf0f05
 
+git -C "$PROJECT_ROOT" submodule update --init third_party/SAGS
 ln -sfn ../TRELLIS/.venv "$THIRD_PARTY/SAGS/.venv"
 ln -sfn ../TRELLIS/.venv "$THIRD_PARTY/TRELLIS-old/.venv"
 echo "InsertAny3D third-party sources are ready"
