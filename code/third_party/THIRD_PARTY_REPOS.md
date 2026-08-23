@@ -23,9 +23,9 @@ SAGS 工作树应保持干净；其余尚未迁移的 `third_party/*` 在 bootst
 - 分支：insertany3d
 
 ## TRELLIS
-- 仓库：https://github.com/MrHandsomeljn/TRELLIS
-- 提交：1c4ab02e359f991d949cc527b81f065f2f266b92
-- 分支：main
+- 仓库：git@github.com:Junnan-bjtu/TRELLIS.git
+- 提交：50599ef1b32bcc43924b19449f9c45689f660e96
+- 分支：insertany3d
 
 ## TRELLIS-old
 - 仓库：https://github.com/microsoft/TRELLIS.git

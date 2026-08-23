@@ -6,3 +6,7 @@
 	path = third_party/gim
 	url = git@github.com:Junnan-bjtu/gim.git
 	branch = insertany3d
+[submodule "third_party/TRELLIS"]
+	path = third_party/TRELLIS
+	url = git@github.com:Junnan-bjtu/TRELLIS.git
+	branch = insertany3d
