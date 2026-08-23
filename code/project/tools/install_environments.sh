@@ -96,7 +96,7 @@ install_main() {
   "$py" -m pip install -e "$BUILD_ROOT/segment-anything-2" --no-deps --no-build-isolation
   "$py" -m pip install -e "$BUILD_ROOT/lang-segment-anything" --no-deps --no-build-isolation
 
-  for module in SAGS TRELLIS-old; do
+  for module in SAGS; do
     local link="$THIRD_PARTY/$module/.venv"
     if [[ -L "$link" ]]; then
       ln -sfn ../TRELLIS/.venv "$link"

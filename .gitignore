@@ -61,3 +61,5 @@ codex_ops/*.ok
 *.zip
 *.tar
 !code/third_party/overlays/*.tar
+
+/third_party/TRELLIS-old/

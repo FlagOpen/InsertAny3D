@@ -35,12 +35,6 @@ assert torch.ones(1, device="cuda").item() == 1
 print("ENV_OK SAGS", torch.__version__, torch.version.cuda)
 '
 
-run_test "TRELLIS-old 共用主环境" "$THIRD_PARTY/TRELLIS-old" "$MAIN" '
-import torch, trellis, lang_sam, sam2
-import flash_attn, kaolin, nvdiffrast, diffoctreerast
-assert torch.ones(1, device="cuda").item() == 1
-print("ENV_OK TRELLIS-old", torch.__version__, torch.version.cuda)
-'
 
 run_test "Hunyuan 独立环境" "$THIRD_PARTY/Hunyuan3D-2" "$HUNYUAN" '
 import torch, hy3dgen, custom_rasterizer, mesh_processor

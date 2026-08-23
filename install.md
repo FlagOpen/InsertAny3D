@@ -92,7 +92,7 @@ bash tools/install_environments.sh all 2>&1 | tee install.log
 
 | 环境 | Python 路径 | 用途 |
 | --- | --- | --- |
-| 主环境 | `third_party/TRELLIS/.venv/bin/python` | TRELLIS、TRELLIS-old、SAGS、LangSAM、3DGS 渲染 |
+| 主环境 | `third_party/TRELLIS/.venv/bin/python` | TRELLIS、SAGS、LangSAM、3DGS 渲染 |
 | Hunyuan 环境 | `third_party/Hunyuan3D-2/.venv/bin/python` | Hunyuan3D-2 |
 | GIM 环境 | `third_party/gim/.venv/bin/python` | GIM、RoMa、Depth Anything |
 
@@ -104,7 +104,7 @@ bash tools/install_environments.sh hunyuan
 bash tools/install_environments.sh gim
 ```
 
-不要混用三套环境，也不要在系统 Python 中补包。`third_party/SAGS/.venv` 和 `third_party/TRELLIS-old/.venv` 会指向主环境，这是正常情况。
+不要混用三套环境，也不要在系统 Python 中补包。SAGS 的 .venv 会指向主环境；TRELLIS-old 仅保留历史文件，不参与安装或主流程。
 
 安装脚本会把部分源码放到 `.build/environment_sources`，其中包含 editable 安装依赖。环境仍在使用时不要删除这个目录。
 

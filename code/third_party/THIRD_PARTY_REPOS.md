@@ -27,7 +27,8 @@ SAGS 工作树应保持干净；其余尚未迁移的 `third_party/*` 在 bootst
 - 提交：50599ef1b32bcc43924b19449f9c45689f660e96
 - 分支：insertany3d
 
-## TRELLIS-old
+## TRELLIS-old（仅保留，不安装）
+- 该目录仅保留历史 legacy 文件，不参与 bootstrap、环境安装或主流程。
 - 仓库：https://github.com/microsoft/TRELLIS.git
 - 提交：eb83038919f6e1feb63accf3a97a377a608c497d
 - 分支：main

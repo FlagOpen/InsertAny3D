@@ -147,13 +147,13 @@ InsertAny3D
 
 项目统一使用三套运行环境，不再为每个第三方仓库分别创建环境：
 
-- 主环境：`third_party/TRELLIS/.venv`，供 TRELLIS、TRELLIS-old、SAGS、
+- 主环境：`third_party/TRELLIS/.venv`，供 TRELLIS、SAGS、
   LangSAM 和 3DGS 渲染代码共同使用；
 - Hunyuan 环境：`third_party/Hunyuan3D-2/.venv`；
 - GIM 环境：`third_party/gim/.venv`。
 
-`third_party/SAGS/.venv` 和 `third_party/TRELLIS-old/.venv` 只是指向主环境的
-符号链接。MVInpainter 是对比实验模型，不属于 InsertAny3D 主流程，也不创建
+SAGS 的 .venv 只是指向主环境的符号链接。TRELLIS-old 仅保留历史文件，不参与主流程。MVInpainter 是对比实验模型，不属于 InsertAny3D 主流程，也不创建
+主流程运行环境。
 主流程运行环境。
 
 环境不会上传到模型仓库。完整安装方法见
