@@ -33,6 +33,6 @@ SAGS 工作树应保持干净；其余尚未迁移的 `third_party/*` 在 bootst
 - 分支：main
 
 ## gim
-- 仓库：https://github.com/xuelunshen/gim.git
-- 提交：89e9cddbf1f013f50587a0198b0382b657cf0f05
-- 分支：main
+- 仓库：https://github.com/Junnan-bjtu/gim.git
+- 提交：e126052d86aa99292e41d289f6fb0b0f37dafe87
+- 分支：insertany3d

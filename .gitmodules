@@ -2,3 +2,7 @@
 	path = third_party/SAGS
 	url = https://github.com/Junnan-bjtu/SAGS.git
 	branch = insertany3d
+[submodule "third_party/gim"]
+	path = third_party/gim
+	url = https://github.com/Junnan-bjtu/gim.git
+	branch = insertany3d
